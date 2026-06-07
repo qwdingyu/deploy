@@ -1,0 +1,787 @@
+# ZL 工具链完整参考手册
+
+> 本文档描述 `/Users/dingyuwang/0-X/deploy/tools/` 下全部工具的运行机制、设计思路、使用方法和注意事项。
+> 所有内容基于实际代码和真实踩坑经验，不含虚构内容。
+
+---
+
+## 目录
+
+1. [架构总览](#1-架构总览)
+2. [local-pack：本地快速打包工具](#2-local-pack本地快速打包工具)
+3. [zl-pipeline：正式发布流水线](#3-zl-pipeline正式发布流水线)
+4. [NuGet 源配置体系](#4-nuget-源配置体系)
+5. [Central Package Management（CPM）体系](#5-central-package-managementcpm体系)
+6. [pipeline.json 配置参考](#6-pipelinejson-配置参考)
+7. [完整工作流：从改代码到发布](#7-完整工作流从改代码到发布)
+8. [踩坑记录](#8-踩坑记录)
+9. [最佳实践](#9-最佳实践)
+10. [注意事项](#10-注意事项)
+11. [故障排查](#11-故障排查)
+
+---
+
+## 1. 架构总览
+
+### 项目关系
+
+```
+iot-sdk (SDK 源码) — 产出 23 个 NuGet 包
+    ├── ZL.Collections, ZL.Shared, ZL.Framing, ZL.Protocol, ZL.Probing
+    ├── ZL.Script, ZL.Scripting, ZL.Connection, ZL.ConnectionGuard
+    ├── ZL.DataProcessing, ZL.Watchdog, ZL.DataConvert
+    ├── ZL.Iot.Interface, ZL.DB.Acc, ZL.Dao.IotDevice, ZL.Dao.Edge
+    ├── ZL.Biz.Execute, ZL.Iot.Plugin, ZL.Iot.Runner.Lib
+    ├── ZL.Iot.Runner.Generator, ZL.EdgeService
+    ├── ProtocolGateway, ProtocolGateway.Scripting
+    │
+    ├── ZL.PlcBase (独立项目) — 产出 ZL.PlcBase, ZL.PFLite, ZL.Tag 等
+    │
+    └── 消费者:
+        ├── tmom          (引用 5 个 ZL 包)
+        ├── UseThink.Iot  (引用 5 个 ZL 包)
+        ├── ZL.PlcSimulator (引用 ZL.Watchdog)
+        └── ZL.Simulator  (引用 ZL.Framing, ZL.Protocol, ZL.Probing)
+```
+
+### 两个工具各司其职
+
+| 维度 | `local-pack` | `zl-pipeline` |
+|------|-------------|---------------|
+| **用途** | 本地开发快速迭代 | 正式发布到 NuGet.org |
+| **语言** | Bash 脚本（267 行） | Python 3（1172 行） |
+| **安装位置** | `~/.local/bin/local-pack` | `~/.local/bin/zl-pipeline` |
+| **源码位置** | `deploy/tools/local-pack.sh` | `deploy/tools/ZL.Pipeline.Cli/zl-pipeline.py` |
+| **目标 feed** | `~/.nuget/local-feed/` | NuGet.org |
+| **混淆** | 不混淆 | 支持 Obfuscar 混淆 + API 完整性验证 |
+| **nuspec 修复** | 不做（依赖 CPM 一致性） | pack 后自动修复 nuspec 依赖版本 |
+| **消费者同步** | 不做 | `sync-consumers` / `align-versions` |
+| **耗时** | 单项目 ~5s，全量 ~30s | 全量含混淆 ~5-10min |
+
+### 设计思路
+
+核心原则：**开发速度和发布质量分离**。
+
+- **开发阶段**用 `local-pack` 追求极速迭代（改代码 → pack → push local-feed → restore，20 秒完成）
+- **发布阶段**用 `zl-pipeline publish` 保证质量（build → pack → fix-nuspec → obfuscate → replace-dll → api-compare → push NuGet.org）
+
+两者通过同一个本地 feed（`~/.nuget/local-feed/`）和同一套 CPM 体系衔接。
+
+---
+
+## 2. local-pack：本地快速打包工具
+
+### 2.1 定位
+
+将任意 .NET 项目打包为 NuGet 包并推送到本地 feed，用于本地开发快速迭代。不限定于 iot-sdk，可打包任何 .NET 项目。
+
+### 2.2 安装
+
+```bash
+# 源码: /Users/dingyuwang/0-X/deploy/tools/local-pack.sh
+# 已复制（非软链接）到 ~/.local/bin/local-pack，该目录已在 PATH 中
+```
+
+安装方式为**文件复制**而非软链接，原因见[踩坑记录 11.1](#111-macos-symlink-权限丢失)。
+
+### 2.3 命令格式
+
+```bash
+local-pack [选项] [项目路径]
+```
+
+| 选项 | 说明 | 默认值 |
+|------|------|--------|
+| `-v, --version VERSION` | 指定打包版本号 | 自动从 CPM/csproj 检测 |
+| `-p, --project NAME` | 只打包指定项目名 | 全量打包 |
+| `--force` | 强制推送（本地 feed 不支持 --skip-duplicate） | 使用 `--skip-duplicate` |
+| `-h, --help` | 显示帮助 | — |
+
+### 2.4 使用示例
+
+```bash
+# 打包 iot-sdk 全部项目（默认路径 + 自动检测版本号）
+local-pack
+
+# 打包 iot-sdk 单个项目
+local-pack -p ZL.Watchdog
+
+# 打包任意项目（指定路径）
+local-pack /Users/dingyuwang/0-X/ZL.PlcBase
+
+# 指定版本号打包
+local-pack -v 1.2.0-dev
+
+# 指定项目和版本号
+local-pack /Users/dingyuwang/0-X/ZL.PlcBase -v 2.0.1
+
+# 打包当前目录
+local-pack .
+```
+
+### 2.5 版本号自动检测机制
+
+`local-pack` 按以下优先级自动检测版本号（当未使用 `-v` 指定时）：
+
+1. **CPM（Directory.Packages.props）**
+   - 如果指定了 `-p`：精准查找该项目的 `PackageVersion` 行中的版本号
+   - 如果未指定 `-p`：统计所有 `PackageVersion` 中**出现次数最多的版本号**作为默认版本
+   - 这解决了 iot-sdk CPM 中混有 ZL.PlcBase 2.0.1 和 iot-sdk 1.1.0 两种版本时取错的问题
+
+2. **Directory.Build.props** 中的 `<Version>` 或 `<VersionPrefix>`
+
+3. **第一个 .csproj** 中的 `<Version>` 或 `<VersionPrefix>`
+
+4. **兜底**：`1.0.0`
+
+### 2.6 项目发现机制
+
+- **有 .sln 文件**：使用 `dotnet pack <sln>` 一次性打包解决方案
+- **无 .sln 文件**：递归查找所有 `.csproj`（maxdepth 3），逐个 `dotnet pack`
+- **指定 `-p`**：先查找 .sln，若无则直接找 `<PROJECT>.csproj`
+
+### 2.7 内部执行流程
+
+```
+解析参数
+  → 解析为绝对路径
+  → 自动检测版本号（如未指定）
+  → cd 到项目目录
+  ├─ 单个项目模式（-p）:
+  │     → dotnet pack <csproj 或 sln> -c Release -o artifacts -p:Version=X --no-restore
+  │     → 在 artifacts/ 中查找 <项目>.<版本>.nupkg
+  │     → dotnet nuget push --source local-feed
+  └─ 全量模式:
+        → rm -f artifacts/*.nupkg  (清理旧包，防止残留)
+        → dotnet pack（sln 或逐个 csproj）-c Release -o artifacts -p:Version=X --no-restore
+        → 遍历 artifacts/*.nupkg，逐个 dotnet nuget push --source local-feed
+```
+
+### 2.8 关键实现细节
+
+- 使用 `--no-restore` 跳过 restore 步骤（假设依赖已缓存），加速打包
+- 全量模式下 pack 前执行 `rm -f artifacts/*.nupkg` 清理，避免旧版本 nupkg 被一并推送
+- nupkg 查找使用精确匹配 `${PROJECT}.${VERSION}.nupkg`，不支持模糊匹配，避免匹配到残留旧版本
+- 兼容 macOS 的 `grep`（使用 `-oE` 而非 `-P`）
+
+---
+
+## 3. zl-pipeline：正式发布流水线
+
+### 3.1 定位
+
+集中管理所有 ZL 项目的正式发布流水线：build → pack → fix-nuspec → obfuscate → replace-dll → api-compare → push NuGet.org。
+
+### 3.2 安装
+
+```bash
+# 源码: /Users/dingyuwang/0-X/deploy/tools/ZL.Pipeline.Cli/zl-pipeline.py
+# 通过 install.sh 生成包装脚本到 ~/.local/bin/zl-pipeline
+bash /Users/dingyuwang/0-X/deploy/tools/ZL.Pipeline.Cli/install.sh
+```
+
+`install.sh` 生成的包装脚本是一个 shell 脚本，通过 `exec python3 <源文件绝对路径> "$@"` 调用原始 Python 文件。这意味着**修改源码后无需重新安装**。
+
+### 3.3 子命令
+
+| 命令 | 说明 |
+|------|------|
+| `zl-pipeline init` | 在当前项目生成 `pipeline.json`，自动探测库项目（排除 test/perf/demo/Exe） |
+| `zl-pipeline publish <version>` | 完整发布流水线 |
+| `zl-pipeline publish <version> --dry-run` | 仅验证不推送 |
+| `zl-pipeline verify <version>` | `publish --dry-run` 的别名 |
+| `zl-pipeline check <包名> <版本>` | 验证已发布的 NuGet 包（检查是否混淆） |
+| `zl-pipeline list-config` | 列出所有可配置项 |
+| `zl-pipeline sync-consumers <version>` | 同步下游消费者 CPM 版本号 |
+| `zl-pipeline align-versions` | 对齐消费者 CPM 中 ZL 包到各自最新 NuGet 版本（独立发版场景） |
+
+### 3.4 publish 流水线步骤
+
+`zl-pipeline publish <version>` 按顺序执行以下步骤：
+
+| 步骤 | 名称 | 说明 |
+|------|------|------|
+| 1 | Clean Build | `dotnet build -c Release` 每个项目，禁用 MSBuild 节点重用（`MSBUILDDISABLENODEREUSE=1`） |
+| 2 | Pack NuGet | `dotnet pack -c Release -p:PackageVersion=<version>`，每个项目独立 pack |
+| 3 | Fix nuspec | 解压 nupkg → 修正 nuspec 中依赖版本 → 重建 nupkg（详见[3.5](#35-nuspec-修复机制)） |
+| 4 | dotnet publish -o | 为混淆准备依赖集（仅当 obfuscar 可用时） |
+| 5 | Obfuscar 混淆 | 对标记 `obfuscate: true` 的项目执行混淆（仅当 obfuscar.console 可用时） |
+| 6 | Replace DLL | 将 nupkg 内原始 DLL 替换为混淆后 DLL（`replace-nupkg-dll.py`） |
+| 7 | API 对比 | 对比混淆前后公共 API 完整性（`api-compare.py`） |
+| 8 | 混淆统计 | 统计 Mapping.txt 中的重命名数量 |
+| 9 | Push | `dotnet nuget push` 到 NuGet.org |
+
+如果 `obfuscar.console` 不可用或没有需要混淆的项目，步骤 4-8 全部跳过，直接执行步骤 9。
+
+### 3.5 nuspec 修复机制（步骤 3）
+
+**问题**：`dotnet pack -p:PackageVersion=X` 只覆盖包自身版本，nuspec 中 `<dependency>` 的版本号仍从 CPM（`Directory.Packages.props`）读取。如果 CPM 未及时更新，nuspec 会引用旧版本依赖。
+
+**解决方案**：pack 完成后，自动修改 nupkg 内的 nuspec 文件：
+
+```python
+# 伪代码
+for each nupkg in artifacts/*.<version>.nupkg:
+    解压 nupkg
+    读取 *.nuspec
+    for each <dependency id="ZL.*" version="旧版本">:
+        if 包名 not in external_deps:  # 排除 ZL.PFLite, ZL.PlcBase, ZL.Tag
+            替换 version 为发布版本号
+    重建 nupkg（完整重建，因为 zip 不支持原地覆盖）
+    删除旧的 .sha512 文件
+```
+
+**外部包白名单**：`ZL.PFLite`, `ZL.PlcBase`, `ZL.Tag` 不被修复（它们来自 ZL.PlcBase 项目，版本独立于 iot-sdk）。
+
+### 3.6 sync-consumers 命令
+
+发布后更新所有下游消费者的 `Directory.Packages.props`：
+
+```bash
+zl-pipeline sync-consumers 1.1.0
+```
+
+支持三种消费者发现模式：
+
+| 模式 | pipeline.json 配置 | 说明 |
+|------|-------------------|------|
+| 显式路径 | `"path": "/path/to/project"` | 直接指定消费者根目录 |
+| auto-discover | `"autoDiscover": true, "path": "/path/to/root"` | 递归扫描目录下所有 `Directory.Packages.props` |
+| glob 通配符 | `"path": "/path/to/projects/*"` | 使用 shell glob 匹配 |
+
+### 3.7 align-versions 命令
+
+适用于 23 个 ZL 包**独立发版**的场景（不同包版本号不同）：
+
+```bash
+zl-pipeline align-versions       # 查询 NuGet.org 最新版本并更新消费者 CPM
+zl-pipeline align-versions --dry-run  # 仅查看不修改
+```
+
+工作流程：
+1. 从 `pipeline.json` 获取所有 ZL 包名
+2. 对每个包查询 NuGet.org 最新版本（通过 `_get_latest_nuget_version`）
+3. 遍历所有消费者 CPM，将每个 ZL 包更新到其各自最新版本
+
+### 3.8 环境变量
+
+| 变量 | 说明 | 必需 |
+|------|------|------|
+| `NUGET_API_KEY` | NuGet.org API Key（推送时用） | 发布时必需 |
+| `OBFUSCAR_PATH` | obfuscar.console 路径 | 混淆时必需（默认 `"obfuscar.console"`，从 PATH 查找） |
+
+---
+
+## 4. NuGet 源配置体系
+
+### 4.1 全局配置
+
+文件：`~/.nuget/NuGet/NuGet.Config`
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <!-- 本地开发 feed：优先使用，用于快速迭代 iot-sdk 本地修改 -->
+    <add key="local-feed" value="/Users/dingyuwang/.nuget/local-feed" />
+    <!-- NuGet.org：正式发布包源，CI/CD 和线上构建使用 -->
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" protocolVersion="3" />
+  </packageSources>
+</configuration>
+```
+
+### 4.2 源优先级行为
+
+NuGet 按 `packageSources` 中声明的顺序搜索，找到匹配版本即停止：
+
+| 场景 | local-feed 有 1.1.0 | nuget.org 有 1.1.0 | restore 结果 |
+|------|---------------------|---------------------|-------------|
+| 消费者 CPM 指定 1.1.0 | ✅ | ✅ | 命中 **local-feed**（优先级高） |
+| 消费者 CPM 指定 1.1.0 | ❌ | ✅ | 命中 **nuget.org**（fallback） |
+| 消费者 CPM 指定 1.2.0 | ❌ | ❌ | **失败** |
+| 非 ZL 第三方包 | ❌ | ✅ | 命中 **nuget.org** |
+
+**关键结论**：local-feed 只在有同名同版本时拦截，不影响 nuget.org 上的其他包。local-feed 优先级在前是为了让开发者本地修改的包优先被消费者命中。
+
+### 4.3 本地 feed 目录
+
+路径：`~/.nuget/local-feed/`
+
+这是一个**flat container** 格式的 NuGet 源，目录中直接存放 `.nupkg` 文件，无需数据库或索引。NuGet 客户端通过文件名解析包名和版本号。
+
+当前内容（示例）：
+- iot-sdk 23 个包 × 1.1.0
+- ZL.PlcBase 6 个包 × 2.0.1
+
+### 4.4 项目级 NuGet.config（历史遗留，已清理）
+
+之前各消费者项目（tmom、ZL.PlcSimulator、ZL.Simulator）各自有 `NuGet.config` 声明了不同的本地 feed 路径（`.nuget/packages/` 或 `~/.nuget/local-feed/`），造成源配置混乱。现已**全部删除**，统一使用全局配置。
+
+### 4.5 全局包缓存
+
+路径：`~/.nuget/packages/`
+
+这是 NuGet 的**全局包缓存**（global-packages），所有 `dotnet restore` 下载的包都缓存到这里。大小约 4.1GB。这个缓存**不受 local-feed 影响**，local-feed 中的包在 restore 时也会被解压到这里。
+
+---
+
+## 5. Central Package Management（CPM）体系
+
+### 5.1 当前状态
+
+| 项目 | CPM 文件 | 管理包数量 |
+|------|---------|-----------|
+| iot-sdk | `Directory.Packages.props` | 23 个 ZL 包 + ~40 个第三方包 |
+| tmom | `Directory.Packages.props` | 5 个 ZL 包 + 业务第三方包 |
+| UseThink.Iot | `Directory.Packages.props` | 5 个 ZL 包 + 业务第三方包 |
+| ZL.PlcSimulator | `Directory.Packages.props` | ZL.Watchdog + 9 个第三方包 |
+| ZL.Simulator | `Directory.Packages.props` | 3 个 ZL 包 + 11 个第三方包 |
+
+### 5.2 迁移历史
+
+所有项目最初使用 `ProjectReference` 或带 `Version` 的 `PackageReference`。迁移步骤：
+
+1. 消除 `ProjectReference` → 改为 `PackageReference`
+2. 创建 `Directory.Packages.props`（CPM）
+3. 从 `.csproj` 中移除所有 `Version="x.x.x"` 属性
+
+**注意**：ZL.PlcSimulator 和 ZL.Simulator 中有不引用 ZL 包的项目（如 PlcSimulator.UI、PlcSimulator.Grpc、Simulator.Avalonia 等），这些项目的 `PackageReference` 仍保留 `Version` 属性，因为它们不在 CPM 管理范围内（CPM 的 `ManagePackageVersionsCentrally` 覆盖了整个解决方案）。对 CPM 中已声明的包，`.csproj` 中不允许带 `Version`。
+
+### 5.3 iot-sdk CPM 的特殊结构
+
+iot-sdk 的 `Directory.Packages.props` 中包含三个不同版本的 ZL 包：
+
+```xml
+<!-- ZL.PlcBase 系列（独立项目，版本 2.0.1） -->
+<PackageVersion Include="ZL.PFLite" Version="2.0.1" />
+<PackageVersion Include="ZL.PlcBase" Version="2.0.1" />
+<PackageVersion Include="ZL.Tag" Version="2.0.1" />
+
+<!-- ProtocolGateway 系列（1.1.0） -->
+<PackageVersion Include="ProtocolGateway" Version="1.1.0" />
+
+<!-- ZL IoT SDK 系列（1.1.0） -->
+<PackageVersion Include="ZL.Collections" Version="1.1.0" />
+<!-- ... 其余 21 个包均为 1.1.0 -->
+```
+
+ZL.PlcBase/ZL.PFLite/ZL.Tag 版本为 2.0.1（来自 ZL.PlcBase 项目），其余 23 个 iot-sdk 包为 1.1.0。这是**独立发版**的正常结果。
+
+---
+
+## 6. pipeline.json 配置参考
+
+### 6.1 文件位置
+
+`/Users/dingyuwang/0-X/iot-sdk/pipeline.json`
+
+### 6.2 配置结构
+
+```jsonc
+{
+  "$schema": "https://raw.githubusercontent.com/usethink/ZL.Pipeline/main/schemas/pipeline-schema.json",
+  "version": "1.0",
+  "projects": [
+    {
+      "name": "ZL.Watchdog",           // 包名
+      "csproj": "src/platform/ZL.Watchdog/ZL.Watchdog.csproj",  // 相对路径
+      "obfuscate": true                // 是否需要混淆
+    }
+    // ... 共 23 个项目
+  ],
+  "nugetSource": "https://api.nuget.org/v3/index.json",
+  "publishTimeout": 120,               // 推送超时秒数
+  "dryRun": false,
+  "consumers": [
+    {
+      "name": "tmom",
+      "path": "/Users/dingyuwang/0-X/tmom",
+      "cpmFile": "Directory.Packages.props",
+      "buildTarget": "api/TMom.Device.Runtime.Host/TMom.Device.Runtime.Host.csproj",
+      "autoCommit": false
+    },
+    {
+      "name": "UseThink.Iot.api",
+      "path": "/Users/dingyuwang/0-X/UseThink.Iot/api",
+      "cpmFile": "Directory.Packages.props",
+      "buildTarget": "UseThink.Iot/UseThink.Iot.csproj",
+      "autoCommit": false
+    }
+  ]
+}
+```
+
+### 6.3 字段说明
+
+**projects 数组：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 包名（必须与 csproj 中 PackageId 一致） |
+| `csproj` | string | 相对于 pipeline.json 的 .csproj 路径 |
+| `obfuscate` | boolean | 是否混淆（默认 true）。Interface 和 Scripting 项目通常设为 false |
+
+**consumers 数组：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | string | 消费者名称（显示用） |
+| `path` | string | 消费者项目根目录绝对路径 |
+| `cpmFile` | string | CPM 文件名（默认自动查找 `Directory.Packages.props`） |
+| `buildTarget` | string | 同步版本后验证编译的目标项目（相对于 path） |
+| `autoCommit` | boolean | 是否自动 git commit（默认 false） |
+| `autoDiscover` | boolean | 是否自动扫描子目录中的 CPM（替代显式 path） |
+| `discoverDepth` | int | autoDiscover 时的最大递归深度（默认 5） |
+
+---
+
+## 7. 完整工作流：从改代码到发布
+
+### 7.1 日常开发（本地迭代）
+
+```bash
+# 1. 修改 iot-sdk 代码
+vim /Users/dingyuwang/0-X/iot-sdk/src/platform/ZL.Watchdog/SomeClass.cs
+
+# 2. 打包推送到本地 feed（~5-30 秒）
+local-pack -p ZL.Watchdog
+
+# 3. 消费者 restore（自动命中 local-feed 中的新版本）
+cd /Users/dingyuwang/0-X/ZL.PlcSimulator/src/PlcSimulator.Core
+dotnet restore
+
+# 4. 编译测试
+dotnet build
+```
+
+如果修改了多个包：
+
+```bash
+local-pack                                    # 全量打包 23 个项目
+cd /Users/dingyuwang/0-X/tmom/api
+dotnet restore TMom.Device.Runtime.Host/TMom.Device.Runtime.Host.csproj
+```
+
+### 7.2 修改 ZL.PlcBase（独立项目）
+
+```bash
+# 1. 修改代码
+vim /Users/dingyuwang/0-X/ZL.PlcBase/ZL.PlcBase/SomeClass.cs
+
+# 2. 打包（需指定版本号以匹配消费者 CPM）
+local-pack /Users/dingyuwang/0-X/ZL.PlcBase -v 2.0.1
+
+# 3. 消费者 restore
+cd /Users/dingyuwang/0-X/iot-sdk
+dotnet restore
+```
+
+### 7.3 正式发布
+
+```bash
+# 1. 确保 CPM 版本正确
+#    编辑 /Users/dingyuwang/0-X/iot-sdk/Directory.Packages.props
+#    将所有 iot-sdk 包更新为目标版本（如 1.1.1）
+
+# 2. 运行发布流水线（含混淆、验证）
+cd /Users/dingyuwang/0-X/iot-sdk
+zl-pipeline publish 1.1.1
+
+# 3. 同步消费者 CPM
+zl-pipeline sync-consumers 1.1.1
+
+# 4. 验证消费者可编译
+cd /Users/dingyuwang/0-X/tmom/api
+dotnet restore
+dotnet build TMom.Device.Runtime.Host/TMom.Device.Runtime.Host.csproj
+```
+
+### 7.4 独立发版（单个包发新版）
+
+当只有某个包需要发版（如 ZL.Watchdog 发 1.2.0，其他包保持 1.1.0）：
+
+```bash
+# 1. 只更新 CPM 中该包的版本
+#    编辑 Directory.Packages.props: ZL.Watchdog 1.1.0 → 1.2.0
+
+# 2. 用 zl-pipeline 发布全部（或者手动只 pack 该包）
+cd /Users/dingyuwang/0-X/iot-sdk
+dotnet pack src/platform/ZL.Watchdog/ZL.Watchdog.csproj -c Release -p:PackageVersion=1.2.0 -o artifacts
+dotnet nuget push artifacts/ZL.Watchdog.1.2.0.nupkg -s https://api.nuget.org/v3/index.json -k $NUGET_API_KEY
+
+# 3. 使用 align-versions 更新所有消费者
+zl-pipeline align-versions
+```
+
+---
+
+## 8. 踩坑记录
+
+### 8.1 `dotnet pack -p:PackageVersion=X` 不更新 nuspec 依赖版本
+
+**现象**：使用 `dotnet pack -p:PackageVersion=1.0.5` 打包后，生成的 nupkg 内 nuspec 文件中 `<dependency id="ZL.Watchdog" version="1.0.4">` 仍是 CPM 中的旧版本。
+
+**根因**：`-p:PackageVersion` 仅覆盖包自身版本（`<version>` 元素），不覆盖 `<dependencies>` 中的版本。依赖版本从 CPM 读取。
+
+**解决方案**：`zl-pipeline.py` 步骤 3，pack 后自动解压 nupkg → 修正 nuspec → 重建。
+
+### 8.2 NuGet.org 发布后传播延迟
+
+**现象**：`dotnet nuget push` 返回成功，但消费者 `dotnet restore` 立即找不到包。
+
+**根因**：NuGet.org 的 flat container API（`/v3-flatcontainer/<id>/<ver>/<file>`）和搜索索引有传播延迟，通常几分钟。
+
+**已验证的传播时间线**：
+- `index.json` 端点：约 30-60 秒可用
+- 搜索 API（`azuresearch-us-central1`）：约 2-5 分钟可用
+- `dotnet package search`：约 2-5 分钟可用
+- `dotnet restore`：依赖客户端缓存，可能需要清除缓存
+
+**解决方案**：
+- 开发阶段使用 `local-pack` → 本地 feed（零延迟）
+- 发布后如 restore 失败，执行 `dotnet nuget locals http-cache -c` 清除缓存
+
+### 8.3 NuGet.org flat container URL 大小写敏感
+
+**现象**：`https://api.nuget.org/v3-flatcontainer/zl.watchdog/1.1.0/...` 返回 404。
+
+**根因**：NuGet.org flat container 的包名路径必须使用**小写**。
+
+**解决方案**：所有 flat container URL 构造时使用 `.lower()`。`align-zl-packages.py` 脚本已修复。
+
+### 8.4 NuGet 包名冲突（供应链安全）
+
+**现象**：发布 v1.0.4 后发现 NuGet.org 上已有第三方发布的 `ZL.Dao.IotDevice 1.0.5`、`ZL.Biz.Execute 1.0.8` 等更高版本号。
+
+**根因**：NuGet 包名全局唯一，但任何人都可以发布任何名字的包（只要版本号不同）。第三方抢注了更高版本号。
+
+**解决方案**：直接跳到更高版本号（1.1.0）发布。NuGet.org 不允许删除已发布版本，只能发布新版本覆盖。
+
+### 8.5 `grep -P` 在 macOS 不可用
+
+**现象**：`local-pack.sh` 中 `grep -oP 'Version="\K[^"]+'` 在 macOS 上报错。
+
+**根因**：macOS 自带的 `grep` 是 BSD grep，不支持 `-P`（Perl 正则）。GNU grep（`ggrep`）才支持。
+
+**解决方案**：全部改为 `grep -oE`（Extended regex）+ `sed` 后处理。
+
+### 8.6 本地 feed 不支持 `--skip-duplicate`
+
+**现象**：`dotnet nuget push --source local-feed --skip-duplicate` 输出警告但不跳过。
+
+**根因**：`--skip-duplicate` 是 NuGet 服务端功能，本地文件系统 feed 不支持该协议。
+
+**解决方案**：脚本中使用 `|| true` 忽略该警告（因为本地 feed push 总是"成功"覆盖）。如需强制覆盖使用 `--force` 参数切换到 `--no-service-endpoint`。
+
+### 8.7 CPM 版本检测取到错误包版本号
+
+**现象**：`local-pack` 自动检测 iot-sdk 版本号时，取到了 `2.0.1`（ZL.PlcBase 的版本）而非 `1.1.0`（iot-sdk 的版本）。
+
+**根因**：最初的检测逻辑取 CPM 中**第一个** `Version="..."` 匹配，而 CPM 中第一条是 `<PackageVersion Include="ZL.PFLite" Version="2.0.1" />`。
+
+**解决方案**：
+- 指定 `-p` 时：精准 grep 该包名的 `PackageVersion` 行
+- 不指定 `-p` 时：统计所有版本号出现频率，取**众数**（`sort | uniq -c | sort -rn | head -1`）
+
+### 8.8 artifacts 目录残留旧版本 nupkg
+
+**现象**：先用错误版本 1.0.0 打包，再用正确版本 2.0.1 打包，`artifacts/` 中两个版本的 nupkg 共存，`find ... | sort -r` 按字母排序把 2.0.1 排在 1.0.0 前面导致推送了错误版本。
+
+**解决方案**：全量打包模式下，pack 前执行 `rm -f artifacts/*.nupkg` 清理。单个项目模式下使用精确文件名匹配 `${PROJECT}.${VERSION}.nupkg`。
+
+### 8.9 macOS symlink 权限丢失
+
+**现象**：`ln -sf local-pack.sh ~/.local/bin/local-pack` 创建的软链接偶尔报 `Permission denied`。
+
+**根因**：软链接的目标文件权限变化或终端 session 的权限缓存问题。
+
+**解决方案**：改为**文件复制** `cp local-pack.sh ~/.local/bin/local-pack` + `chmod +x`。
+
+### 8.10 OPC UA Session.CreateAsync API 变更
+
+**现象**：`ConnectionTestService.cs` 中 `Session.CreateAsync()` 报告 "obsolete"。
+
+**根因**：`OPCFoundation.NetStandard.Opc.Ua` 库的 `ISessionFactory.DefaultSessionFactory()` 要求传入 `ITelemetryContext` 参数。
+
+**解决方案**：使用 `TelemetryContext.CreateDefault()` 创建默认上下文传入，并在 `Directory.Build.props` 中通过 `<NoWarn>` 抑制剩余的外部 obsolete 警告。
+
+### 8.11 tmom TMom.sln 包含过期项目引用
+
+**现象**：`dotnet restore TMom.sln` 失败，报 `MSB3202: 未找到项目文件 UseThink.Iot/UseThink.Iot.csproj`。
+
+**根因**：`TMom.sln` 中包含大量过期引用（UseThink.Iot、ZL.PlcBase 本地路径等），这些项目已被迁移为 NuGet 引用或删除。
+
+**解决方案**：绕过 sln，直接 restore 具体 `.csproj` 文件。sln 文件的清理尚未完成（需单独处理）。
+
+---
+
+## 9. 最佳实践
+
+### 9.1 版本管理
+
+1. **CPM 更新在 pack 之前**：修改 `Directory.Packages.props` 中的版本号后再执行 pack/publish。这是最高优先级原则。
+2. **不要依赖 `-p:PackageVersion` 覆盖**：它只覆盖包自身版本，不覆盖依赖版本。
+3. **独立发版时使用 `align-versions`**：当包版本不一致时，用 `zl-pipeline align-versions` 自动对齐消费者。
+
+### 9.2 开发效率
+
+1. **本地开发只用 `local-pack`**：不要为本地调试发 NuGet.org。
+2. **单项目打包**：`local-pack -p <项目名>` 只打包修改的包，速度快。
+3. **版本号对齐**：`local-pack` 自动从 CPM 检测版本，消费者 CPM 版本与 local-feed 版本必须一致才能被命中。
+
+### 9.3 NuGet 源管理
+
+1. **全局配置唯一源**：所有项目使用 `~/.nuget/NuGet/NuGet.Config`，不要在各项目中放 `NuGet.config`。
+2. **local-feed 在前**：保证本地开发包优先被命中。
+3. **定期清理 local-feed**：删除过期版本，避免混淆。
+4. **CI 环境不加 local-feed**：保证 CI 只依赖 NuGet.org，构建可重复。
+
+### 9.4 CPM 管理
+
+1. **所有 .csproj 中不带 Version**：消费者 CPM 覆盖范围内的所有 `PackageReference` 不得含 `Version` 属性。
+2. **第三方包也入 CPM**：ZL.Simulator 的经验教训 — 只要启用了 CPM，所有 `PackageReference`（包括 Serilog、Newtonsoft.Json 等）都必须在 CPM 中声明版本。
+3. **不在 CPM 范围内的项目**：如 PlcSimulator.UI（无 CPM 继承），保留 `Version` 属性是正常的。
+
+---
+
+## 10. 注意事项
+
+### 10.1 local-feed 是本地机器专用的
+
+- `~/.nuget/local-feed/` 不纳入 Git 版本控制
+- 不与其他机器共享
+- 新机器需要重新执行 `local-pack` 填充
+
+### 10.2 NuGet.org 已发布的版本不可删除
+
+- 打了 bug 的版本永远留在 NuGet.org 上
+- 只能发布新版本（更高版本号）来替代
+- 务必在 `--dry-run` 模式下充分验证后再正式发布
+
+### 10.3 版本号必须严格匹配
+
+- NuGet 按版本号**精确匹配**，local-feed 中的 1.1.0 不会拦截 CPM 中 1.1.1 的请求
+- 消费者 CPM 中的版本号必须与 local-feed 或 NuGet.org 中的版本号完全一致
+
+### 10.4 混淆相关
+
+- 只有 `obfuscate: true` 的项目才会走混淆流程
+- Interface 项目（`ZL.Iot.Interface`）和 Scripting 项目通常为 `obfuscate: false`
+- 如果 `obfuscar.console` 未安装，混淆步骤自动跳过，不影响发布
+- 混淆后的 DLL 通过 `replace-nupkg-dll.py` 替换进 nupkg，并经过 `api-compare.py` 验证公共 API 完整性
+
+### 10.5 MSBuild 稳定性
+
+- `zl-pipeline publish` 设置 `MSBUILDDISABLENODEREUSE=1` 防止 MSB4166 子节点崩溃
+- pack 操作设置 `retry=2` 应对偶发的 MSBuild 节点问题
+- build 操作设置 `retry=1`
+
+---
+
+## 11. 故障排查
+
+### 11.1 restore 找不到 ZL 包
+
+```bash
+# 1. 确认 local-feed 中有对应版本
+ls ~/.nuget/local-feed/ZL.Watchdog.*.nupkg
+
+# 2. 确认消费者 CPM 版本号与 local-feed 一致
+grep ZL.Watchdog /Users/dingyuwang/0-X/ZL.PlcSimulator/Directory.Packages.props
+
+# 3. 确认全局 NuGet.Config 中 local-feed 排在第一位
+cat ~/.nuget/NuGet/NuGet.Config
+
+# 4. 清除 NuGet 缓存
+dotnet nuget locals http-cache -c
+dotnet nuget locals global-packages -c
+
+# 5. 重新 restore
+dotnet restore
+```
+
+### 11.2 local-pack 打包失败
+
+```bash
+# 1. 确认项目能编译
+cd /Users/dingyuwang/0-X/iot-sdk
+dotnet build -c Release
+
+# 2. 指定版本号重试
+local-pack -v 1.1.0
+```
+
+### 11.3 zl-pipeline publish 失败
+
+```bash
+# 1. 先用 dry-run 验证
+zl-pipeline publish 1.1.0 --dry-run
+
+# 2. 检查环境变量
+echo $NUGET_API_KEY    # 推送时需要
+
+# 3. 检查 obfuscar（如果不需要混淆可忽略）
+which obfuscar.console
+```
+
+### 11.4 CPM 报错 NU1008
+
+```
+error NU1008: 以下 PackageReference 项无法定义版本的值: Xxx。
+使用中央包管理的项目必须在 PackageVersion 项上定义版本值。
+```
+
+**原因**：某个 `.csproj` 中的 `PackageReference` 带 `Version` 属性，但该包在 CPM 的 `Directory.Packages.props` 中没有对应的 `PackageVersion`。
+
+**修复**：在 `Directory.Packages.props` 中添加 `<PackageVersion Include="Xxx" Version="y.y.y" />`，并从 `.csproj` 中移除 `Version` 属性。
+
+### 11.5 消费者编译出现 Source Generators 冲突
+
+```
+error CS0122: 'T4SourceGenerator' is inaccessible due to its protection level
+```
+
+**原因**：多个项目使用同一 Source Generator 库（如 SqlSugar），产生冲突。
+
+**修复**：在共享库项目（如 ZL.Dao.IotDevice）的 `.csproj` 中禁用生成器：
+
+```xml
+<ItemGroup>
+  <AssemblyAttribute Remove="SqlSugar" />
+  <T4 Remove="**/*.tt" />
+</ItemGroup>
+```
+
+---
+
+## 附录 A：文件清单
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| `deploy/tools/local-pack.sh` | Bash 脚本 | 本地打包工具源码 |
+| `deploy/tools/ZL.Pipeline.Cli/zl-pipeline.py` | Python 脚本 | 正式发布流水线源码 |
+| `deploy/tools/ZL.Pipeline.Cli/install.sh` | Bash 脚本 | zl-pipeline 安装脚本 |
+| `deploy/tools/ZL.Pipeline.Cli/scripts/replace-nupkg-dll.py` | Python 脚本 | 替换 nupkg 内 DLL 为混淆版 |
+| `deploy/tools/ZL.Pipeline.Cli/scripts/api-compare.py` | Python 脚本 | 混淆前后 API 完整性对比 |
+| `deploy/tools/ZL.Pipeline.Cli/scripts/verify-nuget-obfuscation.sh` | Bash 脚本 | 验证 NuGet 包混淆状态 |
+| `deploy/tools/ZL.Pipeline.Cli/schemas/pipeline-schema.json` | JSON Schema | pipeline.json 的 schema 定义 |
+| `~/.local/bin/local-pack` | Bash 脚本 | local-pack 全局 CLI（文件复制） |
+| `~/.local/bin/zl-pipeline` | Shell 包装脚本 | zl-pipeline 全局 CLI（调用原始 Python） |
+| `~/.nuget/NuGet/NuGet.Config` | XML 配置 | 全局 NuGet 源配置 |
+| `~/.nuget/local-feed/*.nupkg` | NuGet 包 | 本地 feed 包文件 |
+| `iot-sdk/pipeline.json` | JSON 配置 | iot-sdk 发布流水线配置 |
+| `iot-sdk/Directory.Packages.props` | XML 配置 | iot-sdk CPM |
+
+## 附录 B：关键路径
+
+| 路径 | 说明 |
+|------|------|
+| `/Users/dingyuwang/0-X/iot-sdk/` | iot-sdk 源码（23 个项目） |
+| `/Users/dingyuwang/0-X/ZL.PlcBase/` | ZL.PlcBase 源码（独立项目，无 sln） |
+| `/Users/dingyuwang/0-X/tmom/` | tmom 消费者项目 |
+| `/Users/dingyuwang/0-X/UseThink.Iot/` | UseThink.Iot 消费者项目 |
+| `/Users/dingyuwang/0-X/ZL.PlcSimulator/` | ZL.PlcSimulator 消费者项目 |
+| `/Users/dingyuwang/0-X/ZL.Simulator/` | ZL.Simulator 消费者项目 |
+| `/Users/dingyuwang/0-X/deploy/tools/` | 工具链根目录 |
+| `~/.nuget/local-feed/` | 本地 NuGet feed |
+| `~/.nuget/packages/` | 全局包缓存（~4.1GB） |

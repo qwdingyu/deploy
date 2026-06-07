@@ -320,6 +320,66 @@ def cmd_publish(args):
                 sys.exit(1)
 
     # ====================================================================
+    # 步骤 3: 修复 nuspec 依赖版本一致性
+    # 根因：dotnet pack -p:PackageVersion=X 只覆盖自身版本，
+    #       nuspec 中的依赖版本从 CPM 读取（旧版本）。
+    # 方案：pack 后自动修复 nupkg 内 nuspec 的依赖版本，确保一致性。
+    # ====================================================================
+    step(3, f"Fix nuspec dependency versions to {version}", cfg)
+    import zipfile, shutil, tempfile
+    fixed_count = 0
+    external_deps = {"ZL.PFLite", "ZL.PlcBase", "ZL.Tag"}  # 外部包，保持原版本
+    dep_pattern = re.compile(r'<dependency\s+id="(ZL\.[^"]+|ProtocolGateway[^"]*)"\s+version="([^"]+)"')
+    for nupkg in sorted(artifacts_dir.glob(f"*.{version}.nupkg")):
+        nupkg_name = nupkg.name
+        try:
+            needs_fix = False
+            new_nuspecs = {}
+            with zipfile.ZipFile(nupkg, 'r') as zf:
+                nuspec_files = [f for f in zf.namelist() if f.endswith('.nuspec')]
+                for nf in nuspec_files:
+                    nuspec_xml = zf.read(nf).decode('utf-8', errors='replace')
+                    original = nuspec_xml
+                    # Inline replacement (avoid nonlocal scoping issues)
+                    for m in dep_pattern.finditer(nuspec_xml):
+                        dep_id, dep_ver = m.group(1), m.group(2)
+                        if dep_id in external_deps:
+                            continue
+                        if dep_ver != version:
+                            needs_fix = True
+                            nuspec_xml = nuspec_xml.replace(
+                                f'dependency id="{dep_id}" version="{dep_ver}"',
+                                f'<dependency id="{dep_id}" version="{version}"', 1)
+                    if nuspec_xml != original:
+                        needs_fix = True
+                        new_nuspecs[nf] = nuspec_xml.encode('utf-8')
+            if needs_fix:
+                # 重建整个 nupkg（zip 不支持原地覆盖，需完整重建）
+                tmp = tempfile.NamedTemporaryFile(suffix='.nupkg', delete=False)
+                tmp.close()
+                with zipfile.ZipFile(nupkg, 'r') as src:
+                    with zipfile.ZipFile(tmp.name, 'w', zipfile.ZIP_DEFLATED) as dst:
+                        for info in src.infolist():
+                            if info.filename in new_nuspecs:
+                                dst.writestr(info, new_nuspecs[info.filename])
+                            else:
+                                dst.writestr(info, src.read(info.filename))
+                sha_file = nupkg.with_suffix('.nupkg.sha512')
+                if sha_file.exists():
+                    sha_file.unlink()
+                shutil.move(tmp.name, str(nupkg))
+                fixed_count += 1
+                log(f"  已修复 {nupkg_name} nuspec 依赖版本")
+        except Exception as e:
+            fail(f"{nupkg_name}: nuspec 修复失败: {e}")
+            if args.stop_on_error:
+                sys.exit(1)
+    if fixed_count > 0:
+        ok(f"已自动修复 {fixed_count} 个 nupkg 的 nuspec 依赖版本为 {version}")
+    else:
+        ok(f"nuspec 依赖版本已一致 ({version})，无需修复")
+
+    # ====================================================================
     # 检查是否需要混淆
     # ====================================================================
     obfuscar_available = check_obfuscar()
@@ -333,9 +393,9 @@ def cmd_publish(args):
         return
 
     # ====================================================================
-    # 步骤 3: dotnet publish -o (准备 Obfuscar 依赖集)
+    # 步骤 4: dotnet publish -o (准备 Obfuscar 依赖集)
     # ====================================================================
-    step(3, "dotnet publish -o (准备依赖集)", cfg)
+    step(4, "dotnet publish -o (准备依赖集)", cfg)
     for proj in projects:
         if proj.get("obfuscate", True) != True:
             continue
@@ -355,9 +415,9 @@ def cmd_publish(args):
                 sys.exit(1)
 
     # ====================================================================
-    # 步骤 4: Obfuscar 混淆
+    # 步骤 5: Obfuscar 混淆
     # ====================================================================
-    step(4, "Obfuscar 混淆", cfg)
+    step(5, "Obfuscar 混淆", cfg)
     for proj in obfuscate_projs:
         name = proj["name"]
         pub_dir = obfuscated_dir / name / "publish"
@@ -409,9 +469,9 @@ def cmd_publish(args):
                 sys.exit(1)
 
     # ====================================================================
-    # 步骤 5: 替换 nupkg 中的 DLL
+    # 步骤 6: 替换 nupkg 中的 DLL
     # ====================================================================
-    step(5, "替换 nupkg 中的 DLL", cfg)
+    step(6, "替换 nupkg 中的 DLL", cfg)
     replace_script = SCRIPTS_DIR / "replace-nupkg-dll.py"
     for proj in obfuscate_projs:
         name = proj["name"]
@@ -455,9 +515,9 @@ def cmd_publish(args):
             log(result.stdout + result.stderr)
 
     # ====================================================================
-    # 步骤 6: API 完整性对比
+    # 步骤 7: API 完整性对比
     # ====================================================================
-    step(6, "API 完整性对比", cfg)
+    step(7, "API 完整性对比", cfg)
     api_compare_script = SCRIPTS_DIR / "api-compare.py"
     for proj in obfuscate_projs:
         name = proj["name"]
@@ -483,9 +543,9 @@ def cmd_publish(args):
             fail(f"{name} API 对比 FAILED")
 
     # ====================================================================
-    # 步骤 7: 混淆强度统计
+    # 步骤 8: 混淆强度统计
     # ====================================================================
-    step(7, "混淆强度统计", cfg)
+    step(8, "混淆强度统计", cfg)
     for proj in obfuscate_projs:
         name = proj["name"]
         mapping_file = obfuscated_dir / name / "Mapping.txt"
@@ -500,7 +560,7 @@ def cmd_publish(args):
             log(f"{name}: Mapping.txt not found")
 
     # ====================================================================
-    # 步骤 8: 推送 NuGet
+    # 步骤 9: 推送 NuGet
     # ====================================================================
     do_push(args, cfg, version, proj_dir, artifacts_dir, obfuscate_projs)
 
@@ -508,6 +568,119 @@ def cmd_publish(args):
     # 报告
     # ====================================================================
     print_report(len(projects), obfuscated=True)
+
+
+def _get_latest_nuget_version(package_id: str, nuget_source: str = None) -> str | None:
+    """查询 NuGet.org 上指定包的最新稳定版本号"""
+    import urllib.request, urllib.error
+    if not nuget_source:
+        nuget_source = "https://api.nuget.org/v3/index.json"
+    # 只支持 nuget.org
+    if "nuget.org" not in nuget_source:
+        return None
+    url = f"https://api.nuget.org/v3-flatcontainer/{package_id}/"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as r:
+            content = r.read().decode('utf-8', errors='replace')
+        # 解析 HTML 索引页中的版本号链接
+        import re
+        versions = re.findall(rf'{package_id}/([^"]+)"', content)
+        if versions:
+            # 过滤预发布版本，取最高版本
+            stable = [v for v in versions if '-' not in v]
+            if stable:
+                stable.sort(key=lambda v: [int(x) for x in v.split('.') if x.isdigit()])
+                return stable[-1]
+    except Exception:
+        pass
+    return None
+
+
+def cmd_align_versions(args):
+    """对齐消费者 CPM 中 ZL 包的版本到各自最新 — 解决独立发版导致的版本碎片化"""
+    cfg = load_config(args.config)
+    dry_run = args.dry_run or cfg.get("dryRun", False)
+    consumers = cfg.get("consumers", [])
+    nuget_source = cfg.get("nugetSource", "https://api.nuget.org/v3/index.json")
+
+    if not consumers:
+        fail("pipeline.json 中未定义 consumers")
+        return
+
+    # 获取 pipeline 中定义的所有 ZL 包
+    projects = cfg.get("projects", [])
+    zl_package_ids = set()
+    for proj in projects:
+        pkg_id = get_package_id(os.path.dirname(os.path.abspath(args.config)) if args.config else str(Path.cwd()), proj)
+        zl_package_ids.add(pkg_id)
+
+    # 查询每个包的最新版本
+    print(f"\n{'=' * 60}")
+    print(f"  查询 NuGet.org 最新版本")
+    print(f"{'=' * 60}")
+
+    latest_versions = {}
+    for pkg_id in sorted(zl_package_ids):
+        latest = _get_latest_nuget_version(pkg_id, nuget_source)
+        if latest:
+            latest_versions[pkg_id] = latest
+            print(f"  {pkg_id:35s} => {latest}")
+        else:
+            fail(f"{pkg_id}: 无法查询最新版本")
+
+    if not latest_versions:
+        fail("未能获取任何包的版本信息")
+        return
+
+    # 更新每个消费者的 CPM
+    for consumer in consumers:
+        consumer_name = consumer.get("name", "unknown")
+        consumer_paths = _expand_consumer_paths(consumer, os.path.dirname(args.config) if args.config else str(Path.cwd()))
+
+        for cpm_path in consumer_paths:
+            if not cpm_path.exists():
+                fail(f"消费者 {consumer_name}: CPM 不存在 {cpm_path}")
+                continue
+
+            print(f"\n{'=' * 60}")
+            print(f"  对齐消费者: {consumer_name}")
+            print(f"  CPM: {cpm_path}")
+            print(f"{'=' * 60}")
+
+            content = cpm_path.read_text(encoding="utf-8")
+            updated_count = 0
+            unchanged_count = 0
+
+            for pkg_id in sorted(latest_versions.keys()):
+                new_version = latest_versions[pkg_id]
+                pattern = rf'(PackageVersion Include="{re.escape(pkg_id)}"\s+Version=")([^"]+)(")'
+                match = re.search(pattern, content)
+                if not match:
+                    log(f"{pkg_id}: CPM 中未找到，跳过")
+                    continue
+
+                old_version = match.group(2)
+                if old_version == new_version:
+                    unchanged_count += 1
+                    continue
+
+                content = re.sub(pattern, rf'\g<1>{new_version}\3', content)
+                updated_count += 1
+                print(f"  {pkg_id:35s} {old_version} => {new_version}")
+
+            if updated_count > 0:
+                if dry_run:
+                    print(f"  [DRY-RUN] 将更新 {updated_count} 个包，{unchanged_count} 个已是最新")
+                else:
+                    cpm_path.write_text(content, encoding="utf-8")
+                    print(f"  ✅ 已更新 {updated_count} 个包，{unchanged_count} 个已是最新")
+            else:
+                print(f"  ✅ 所有包已是最新版本")
+
+    if dry_run:
+        print(f"\n  [DRY-RUN] 未实际修改任何文件")
+    else:
+        print(f"\n  ✅ align-versions 完成")
 
 
 def cmd_verify(args):
@@ -933,6 +1106,10 @@ def main():
   # 发布后同步下游消费项目
   zl-pipeline sync-consumers 1.0.3
   zl-pipeline sync-consumers 1.0.3 --dry-run
+
+  # 对齐下游消费者 CPM 中 ZL 包到各自最新版本（非全量同步）
+  zl-pipeline align-versions
+  zl-pipeline align-versions --dry-run
         """
     )
     parser.add_argument("--config", "-c", help="pipeline.json 路径 (默认: 当前目录)")
@@ -967,6 +1144,10 @@ def main():
     sync_parser.add_argument("version", help="版本号, e.g. 1.0.3")
     sync_parser.add_argument("--dry-run", "-n", action="store_true", help="仅验证不修改")
 
+    # align-versions
+    align_parser = subparsers.add_parser("align-versions", help="对齐下游消费者 CPM 中 ZL 包到各自最新版本")
+    align_parser.add_argument("--dry-run", "-n", action="store_true", help="仅验证不修改")
+
     args = parser.parse_args()
 
     if args.command == "init":
@@ -981,6 +1162,8 @@ def main():
         cmd_list_config(args)
     elif args.command == "sync-consumers":
         cmd_sync_consumers(args)
+    elif args.command == "align-versions":
+        cmd_align_versions(args)
     else:
         parser.print_help()
 
