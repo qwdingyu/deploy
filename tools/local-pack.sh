@@ -91,7 +91,8 @@ fi
 SOLUTION=""
 if [[ -n "$PROJECT" ]]; then
     # 单个项目模式：直接找 csproj，不走 sln（否则会打包整个解决方案）
-    csproj=$(find "$PROJ_DIR" -maxdepth 5 -name "${PROJECT}.csproj" 2>/dev/null | head -1)
+    csproj=$(find "$PROJ_DIR" -maxdepth 5 -name "${PROJECT}.csproj" \
+        -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | head -1)
     if [[ -z "$csproj" ]]; then
         echo "错误: 未找到项目 '$PROJECT'"
         exit 1
@@ -138,10 +139,9 @@ detect_version() {
     if [[ -f "$dir/Directory.Packages.props" ]]; then
         if [[ -n "$target_project" ]]; then
             local ver
-            # 使用固定字符串匹配（转义 . 为 \.），避免正则注入
-            local escaped_name
-            escaped_name=$(printf '%s\n' "$target_project" | sed 's/\./\\./g')
-            ver=$(grep "PackageVersion.*Include=\"${escaped_name}\"" "$dir/Directory.Packages.props" 2>/dev/null \
+            # 使用 grep -F（固定字符串匹配），避免正则注入，无需转义
+            ver=$(grep -F "Include=\"${target_project}\"" "$dir/Directory.Packages.props" 2>/dev/null \
+                | grep 'PackageVersion' \
                 | grep -o 'Version="[^"]*"' | head -1 | sed 's/Version="//;s/"//') || true
             if [[ -n "$ver" ]]; then
                 echo "$ver"; return
@@ -159,7 +159,8 @@ detect_version() {
     # 4. Target csproj
     if [[ -n "$target_project" ]]; then
         local tcsproj
-        tcsproj=$(find "$dir" -maxdepth 5 -name "${target_project}.csproj" 2>/dev/null | head -1)
+        tcsproj=$(find "$dir" -maxdepth 5 -name "${target_project}.csproj" \
+            -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | head -1)
         if [[ -n "$tcsproj" && -f "$tcsproj" ]]; then
             local ver
             ver=$(extract_xml_version "$tcsproj")
@@ -216,7 +217,7 @@ if [[ -n "$PROJECT" ]]; then
     if $FORCE; then
         dotnet nuget push "$nupkg" --source "local-feed" --no-service-endpoint 2>&1
     else
-        dotnet nuget push "$nupkg" --source "local-feed" --skip-duplicate 2>&1 || true
+        dotnet nuget push "$nupkg" --source "local-feed" --no-service-endpoint 2>&1 || true
     fi
     echo "✅ $(basename "$nupkg") 已推送到本地 feed"
 
@@ -228,7 +229,8 @@ else
     mkdir -p "$OUTPUT_DIR"
     rm -f "$OUTPUT_DIR"/*.nupkg 2>/dev/null || true
 
-    sln_file=$(find "$PROJ_DIR" -maxdepth 3 -name "*.sln" 2>/dev/null | head -1)
+    sln_file=$(find "$PROJ_DIR" -maxdepth 3 -name "*.sln" \
+        -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | head -1)
     if [[ -n "$sln_file" ]]; then
         dotnet pack "$sln_file" -c Release -o "$OUTPUT_DIR" -p:Version="$VERSION" --nologo 2>&1
     else
@@ -236,7 +238,8 @@ else
         found=0
         packed=0
         skipped=0
-        for csproj in $(find "$PROJ_DIR" -maxdepth 5 -name "*.csproj" 2>/dev/null | sort); do
+        for csproj in $(find "$PROJ_DIR" -maxdepth 5 -name "*.csproj" \
+            -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | sort); do
             stem=$(basename "$csproj" .csproj)
             stem_lower=$(echo "$stem" | tr '[:upper:]' '[:lower:]')
 
@@ -273,11 +276,7 @@ else
     for nupkg in "$OUTPUT_DIR"/*.nupkg; do
         [[ -f "$nupkg" ]] || continue
         name=$(basename "$nupkg")
-        if $FORCE; then
-            dotnet nuget push "$nupkg" --source "local-feed" --no-service-endpoint 2>&1 || true
-        else
-            dotnet nuget push "$nupkg" --source "local-feed" --skip-duplicate 2>&1 || true
-        fi
+        dotnet nuget push "$nupkg" --source "local-feed" --no-service-endpoint 2>&1 || true
         count=$((count+1))
         echo "  [$count] $name"
     done

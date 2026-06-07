@@ -639,7 +639,23 @@ zl-pipeline align-versions
 
 **根因**：包名中的 `.` 未转义为 `\.`。
 
-**解决方案**：查找前用 `sed 's/\./\\./g'` 将包名中的 `.` 全部转义。
+**解决方案**：改用 `grep -F`（固定字符串匹配），无需转义，更安全简洁。
+
+### 8.15 `--skip-duplicate` 在本地 feed 上无效且产生警告
+
+**现象**：`dotnet nuget push --skip-duplicate` 推送本地 feed 时输出 `warn : 此类型的推送当前不支持跳过重复项的选项`。
+
+**根因**：本地 flat container feed 不支持 `--skip-duplicate` 语义。
+
+**解决方案**：统一改用 `--no-service-endpoint`，这是本地 feed 的正确参数。
+
+### 8.16 `find` 未排除 `obj/` `bin/` 目录
+
+**现象**：全量打包时 `find` 可能匹配到 `obj/` 或 `bin/` 下的 `.csproj` 文件（如 MSBuild 生成的中间文件）。
+
+**根因**：`find` 命令未加 `-not -path "*/obj/*" -not -path "*/bin/*"` 过滤。
+
+**解决方案**：所有 `find` 调用统一加上 `obj/` `bin/` 排除。
 
 ---
 
