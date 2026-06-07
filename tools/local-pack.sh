@@ -75,10 +75,11 @@ if [[ -z "$PROJ_DIR" ]]; then
 fi
 
 # Resolve to absolute path
-if ! PROJ_DIR=$(cd "$PROJ_DIR" && pwd) 2>/dev/null; then
+_resolved=$(cd "$PROJ_DIR" 2>/dev/null && pwd) || {
     echo "错误: 目录不存在: $PROJ_DIR"
     exit 1
-fi
+}
+PROJ_DIR="$_resolved"
 
 # Check local-feed directory exists
 if [[ ! -d "$LOCAL_FEED" ]]; then
