@@ -551,10 +551,12 @@ pipeline.json 配置项:
 
   consumers            下游消费项目列表 (数组, 可选)
   consumers[].name           消费项目名称 (必填)
-  consumers[].path           项目根目录 (必填, 绝对路径)
+  consumers[].path           项目根目录 (必填, 绝对路径或 glob 通配符)
   consumers[].cpmFile        Directory.Packages.props 相对路径 (默认: Directory.Packages.props)
   consumers[].buildTarget    编译验证目标 csproj (可选)
   consumers[].autoCommit     是否自动 git commit+push (默认: false)
+  consumers[].autoDiscover   自动扫描目录下所有 CPM 文件 (默认: false)
+  consumers[].discoverDepth  自动扫描最大深度 (默认: 5)
 
 环境变量:
   NUGET_API_KEY       NuGet.org API Key (必填)
@@ -590,6 +592,65 @@ def _update_cpm_version(cpm_path: Path, package_id: str, new_version: str) -> bo
     return True
 
 
+def _discover_cpm_files(root: Path, depth: int = 5) -> list[Path]:
+    """递归扫描指定目录，自动发现所有 Directory.Packages.props 文件"""
+    found = []
+    seen = set()
+    for d in root.rglob("*"):
+        if d.is_dir():
+            rel = d.relative_to(root)
+            if rel.parts and len(rel.parts) > depth:
+                continue
+        cpm = d / "Directory.Packages.props" if d.is_dir() else d
+        if str(d).endswith("Directory.Packages.props") and d.exists() and d.is_file():
+            real = d.resolve()
+            if real not in seen:
+                seen.add(real)
+                found.append(d)
+    return sorted(found)
+
+
+def _expand_consumer_paths(consumer_cfg: dict, base_path: str) -> list[dict]:
+    """展开 consumer 配置，支持 glob 通配符和 auto-discover 模式"""
+    results = []
+    path = consumer_cfg["path"]
+
+    # 模式 1: auto-discover — 自动扫描目录下所有 CPM 文件
+    if consumer_cfg.get("autoDiscover"):
+        root = Path(base_path) / path if not Path(path).is_absolute() else Path(path)
+        if not root.exists():
+            return results
+        depth = consumer_cfg.get("discoverDepth", 5)
+        cpm_files = _discover_cpm_files(root, depth)
+        for cpm in cpm_files:
+            rel = cpm.relative_to(root) if str(cpm).startswith(str(root)) else cpm
+            results.append({
+                "name": str(rel.parent) if str(rel.parent) != "." else root.name,
+                "path": str(cpm.parent),
+                "cpmFile": str(cpm.name),
+                "buildTarget": consumer_cfg.get("buildTarget"),
+                "autoCommit": consumer_cfg.get("autoCommit", False),
+            })
+        return results
+
+    # 模式 2: glob 通配符路径（如 /path/to/projects/*）
+    import glob as glob_mod
+    matches = sorted(glob_mod.glob(path))
+    if matches:
+        for m in matches:
+            results.append({
+                "name": Path(m).name,
+                "path": m,
+                "cpmFile": consumer_cfg.get("cpmFile"),
+                "buildTarget": consumer_cfg.get("buildTarget"),
+                "autoCommit": consumer_cfg.get("autoCommit", False),
+            })
+        return results
+
+    # 模式 3: 普通路径
+    return [consumer_cfg]
+
+
 def cmd_sync_consumers(args):
     """同步下游消费项目的包版本"""
     cfg = load_config(args.config)
@@ -613,17 +674,28 @@ def cmd_sync_consumers(args):
         fail(f"未找到任何 {version} 版本的 nupkg 文件")
         return
 
-    consumers = cfg.get("consumers", [])
-    if not consumers:
+    raw_consumers = cfg.get("consumers", [])
+    if not raw_consumers:
         fail("pipeline.json 中未配置 consumers，请添加下游消费项目配置")
         log("示例:")
         log('  "consumers": [{"name": "tmom", "path": "/path/to/tmom"}]')
+        return
+
+    # 展开 glob/auto-discover 配置
+    consumers = []
+    for raw in raw_consumers:
+        expanded = _expand_consumer_paths(raw, proj_dir)
+        consumers.extend(expanded)
+
+    if not consumers:
+        fail("展开 consumers 配置后无有效目标")
         return
 
     step(0, f"同步下游消费项目 (version={version})", cfg)
 
     total_updated = 0
     total_consumers = 0
+    processed_cpm = set()  # 避免同一 CPM 文件被重复更新
 
     for consumer in consumers:
         cname = consumer["name"]
@@ -644,6 +716,13 @@ def cmd_sync_consumers(args):
         if not cpm_file.exists():
             fail(f"CPM 文件不存在: {cpm_file}")
             continue
+
+        # 去重：同一 CPM 文件只更新一次
+        cpm_real = cpm_file.resolve()
+        if cpm_real in processed_cpm:
+            log(f"跳过 {cname}: CPM 文件已被处理 ({cpm_file})")
+            continue
+        processed_cpm.add(cpm_real)
 
         log(f"更新 {cname}: {cpm_file}")
         consumer_updated = 0
