@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ZL.Pipeline 配置",
+  "description": "ZL.Pipeline.Cli 的 pipeline.json 配置文件格式",
+  "type": "object",
+  "required": ["version", "projects"],
+
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema 引用 URL"
+    },
+    "version": {
+      "type": "string",
+      "description": "配置格式版本",
+      "enum": ["1.0"]
+    },
+    "projects": {
+      "type": "array",
+      "description": "需要发布的库项目列表",
+      "items": {
+        "type": "object",
+        "required": ["name", "csproj"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "项目名（同时也是 NuGet 包名）"
+          },
+          "csproj": {
+            "type": "string",
+            "description": "csproj 文件路径（相对于项目根目录）"
+          },
+          "obfuscate": {
+            "type": "boolean",
+            "description": "是否启用 Obfuscar 混淆",
+            "default": true
+          },
+          "obfuscarConfig": {
+            "type": "string",
+            "description": "自定义 obfuscar.xml 路径（可选，默认使用顶级配置）"
+          },
+          "includeDependencies": {
+            "type": "array",
+            "description": "额外包含的依赖 DLL 列表（用于 Obfuscar 的 Home）",
+            "items": { "type": "string" },
+            "default": []
+          }
+        }
+      }
+    },
+    "obfuscarConfig": {
+      "type": "string",
+      "description": "默认的 obfuscar.xml 路径",
+      "default": "obfuscar.xml"
+    },
+    "obfuscarGlobal": {
+      "type": "string",
+      "description": "全局 Obfuscar 配置模板路径（如 tools/ZL.Pipeline.Cli/config/obfuscar.xml）",
+      "default": ""
+    },
+    "nugetSource": {
+      "type": "string",
+      "description": "NuGet 推送源",
+      "default": "https://api.nuget.org/v3/index.json"
+    },
+    "publishTimeout": {
+      "type": "integer",
+      "description": "推送超时（秒）",
+      "default": 120,
+      "minimum": 30
+    },
+    "dryRun": {
+      "type": "boolean",
+      "description": "全局 dry-run 模式（仅验证不推送）",
+      "default": false
+    }
+  }
+}
