@@ -18,6 +18,7 @@ LOCAL_FEED="$HOME/.nuget/local-feed"
 OUTPUT_DIR="artifacts"
 
 usage() {
+    local _ec=${1:-0}
     cat << 'EOF'
 local-pack — 将 .NET 项目打包推送到本地 NuGet feed
 
@@ -48,7 +49,7 @@ local-pack — 将 .NET 项目打包推送到本地 NuGet feed
   - ~/.nuget/NuGet/NuGet.Config 中配置了 local-feed 源
 
 EOF
-    exit 0
+    exit "$_ec"
 }
 
 # --- Parse args ---
@@ -64,7 +65,7 @@ while [[ $# -gt 0 ]]; do
         -p|--project) PROJECT="$2"; shift 2 ;;
         -o|--output)  OUTPUT_DIR="$2"; shift 2 ;;
         --force)      FORCE=true; shift ;;
-        -*) echo "未知参数: $1"; usage ;;
+        -*) echo "未知参数: $1"; usage 1 ;;
         *)  PROJ_DIR="$1"; shift ;;
     esac
 done
