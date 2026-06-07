@@ -232,13 +232,18 @@ else
 
     sln_file=$(find "$PROJ_DIR" -maxdepth 3 -name "*.sln" \
         -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | head -1)
+    found=0
+    packed=0
+    skipped=0
+    sln_ok=false
     if [[ -n "$sln_file" ]]; then
-        dotnet pack "$sln_file" -c Release -o "$OUTPUT_DIR" -p:Version="$VERSION" --nologo 2>&1
-    else
-        # No sln — pack each .csproj, skip non-library projects
-        found=0
-        packed=0
-        skipped=0
+        if dotnet pack "$sln_file" -c Release -o "$OUTPUT_DIR" -p:Version="$VERSION" --nologo 2>&1; then
+            sln_ok=true
+        else
+            echo ">>> sln 打包失败，回退到逐个 csproj 模式..."
+        fi
+    fi
+    if ! $sln_ok; then
         for csproj in $(find "$PROJ_DIR" -maxdepth 5 -name "*.csproj" \
             -not -path "*/obj/*" -not -path "*/bin/*" 2>/dev/null | sort); do
             stem=$(basename "$csproj" .csproj)
