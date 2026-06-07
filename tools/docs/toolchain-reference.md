@@ -123,45 +123,49 @@ local-pack .
 
 `local-pack` 按以下优先级自动检测版本号（当未使用 `-v` 指定时）：
 
-1. **CPM（Directory.Packages.props）**
-   - 如果指定了 `-p`：精准查找该项目的 `PackageVersion` 行中的版本号
+1. **Directory.Build.props** 中的 `<Version>` 或 `<VersionPrefix>`
+   - 同时支持属性式 `<Version="1.0.0" />` 和元素式 `<VersionPrefix>1.0.0</VersionPrefix>`
+
+2. **CPM（Directory.Packages.props）**
+   - 如果指定了 `-p`：精准查找该项目的 `PackageVersion` 行中的版本号（包名中的 `.` 会转义为 `\.`，避免正则误匹配）
    - 如果未指定 `-p`：统计所有 `PackageVersion` 中**出现次数最多的版本号**作为默认版本
-   - 这解决了 iot-sdk CPM 中混有 ZL.PlcBase 2.0.1 和 iot-sdk 1.1.0 两种版本时取错的问题
 
-2. **Directory.Build.props** 中的 `<Version>` 或 `<VersionPrefix>`
-
-3. **第一个 .csproj** 中的 `<Version>` 或 `<VersionPrefix>`
+3. **指定 `-p` 时**，从目标 `.csproj` 中查找 `<Version>` 或 `<VersionPrefix>`
 
 4. **兜底**：`1.0.0`
 
 ### 2.6 项目发现机制
 
-- **有 .sln 文件**：使用 `dotnet pack <sln>` 一次性打包解决方案
-- **无 .sln 文件**：递归查找所有 `.csproj`（maxdepth 3），逐个 `dotnet pack`
-- **指定 `-p`**：先查找 .sln，若无则直接找 `<PROJECT>.csproj`
+- **指定 `-p`**：直接查找 `<PROJECT>.csproj`（不走 sln，否则会打包整个解决方案）
+- **全量模式（无 `-p`），有 .sln 文件**：使用 `dotnet pack <sln>` 一次性打包解决方案
+- **全量模式，无 .sln 文件**：递归查找所有 `.csproj`（maxdepth 5），跳过 test/bench/demo 项目和 Exe/WinExe 项目
 
 ### 2.7 内部执行流程
 
 ```
 解析参数
   → 解析为绝对路径
+  → 确认 local-feed 目录存在
   → 自动检测版本号（如未指定）
   → cd 到项目目录
   ├─ 单个项目模式（-p）:
-  │     → dotnet pack <csproj 或 sln> -c Release -o artifacts -p:Version=X --no-restore
-  │     → 在 artifacts/ 中查找 <项目>.<版本>.nupkg
+  │     → 直接查找 <PROJECT>.csproj（不走 sln）
+  │     → dotnet pack <csproj> -c Release -o artifacts -p:Version=X
+  │     → 在 artifacts/ 中查找 <项目>.<版本>.nupkg（精确匹配 + 后缀模糊匹配）
   │     → dotnet nuget push --source local-feed
   └─ 全量模式:
         → rm -f artifacts/*.nupkg  (清理旧包，防止残留)
-        → dotnet pack（sln 或逐个 csproj）-c Release -o artifacts -p:Version=X --no-restore
+        → dotnet pack（sln 或逐个 csproj）-c Release -o artifacts -p:Version=X
         → 遍历 artifacts/*.nupkg，逐个 dotnet nuget push --source local-feed
 ```
 
 ### 2.8 关键实现细节
 
-- 使用 `--no-restore` 跳过 restore 步骤（假设依赖已缓存），加速打包
+- 单个项目模式直接找 `.csproj`，不走 `.sln`，避免打包整个解决方案（否则 `-p` 形同虚设）
 - 全量模式下 pack 前执行 `rm -f artifacts/*.nupkg` 清理，避免旧版本 nupkg 被一并推送
-- nupkg 查找使用精确匹配 `${PROJECT}.${VERSION}.nupkg`，不支持模糊匹配，避免匹配到残留旧版本
+- nupkg 查找使用精确匹配 `${PROJECT}.${VERSION}.nupkg`，失败后尝试 `${PROJECT}.${VERSION}-*.nupkg` 后缀模糊匹配
+- 版本检测同时支持属性式 `<Version="1.0.0" />` 和元素式 `<VersionPrefix>1.0.0</VersionPrefix>`
+- 从 CPM 查找包版本时，包名中的 `.` 会转义为 `\.`，避免 `ZL.Watchdog` 误匹配 `ZLXWatchdog`
 - 兼容 macOS 的 `grep`（使用 `-oE` 而非 `-P`）
 
 ---
@@ -612,6 +616,30 @@ zl-pipeline align-versions
 **根因**：`TMom.sln` 中包含大量过期引用（UseThink.Iot、ZL.PlcBase 本地路径等），这些项目已被迁移为 NuGet 引用或删除。
 
 **解决方案**：绕过 sln，直接 restore 具体 `.csproj` 文件。sln 文件的清理尚未完成（需单独处理）。
+
+### 8.12 local-pack `-p` 参数打包了整个解决方案
+
+**现象**：`local-pack -p ZL.Watchdog` 耗时 30 秒+，打包了 iot-sdk 全部项目而非仅 ZL.Watchdog。
+
+**根因**：`-p` 模式下先查找 `.sln`，找到后执行 `dotnet pack <sln>`，导致整个解决方案被打包。
+
+**解决方案**：`-p` 模式改为直接查找 `<PROJECT>.csproj`，不再走 `.sln`。
+
+### 8.13 版本检测 regex 不支持元素式 XML
+
+**现象**：tmom 和 UseThink.Iot 的 `Directory.Build.props` 使用 `<VersionPrefix>1.0.0</VersionPrefix>` 元素式写法，但 `local-pack` 的 regex 只匹配属性式 `<Version="1.0.0" />`，导致版本检测失败，回退到错误的兜底值。
+
+**根因**：原始 regex `<(?:Version|VersionPrefix)="[^"]*"` 只能匹配属性式 XML，无法匹配元素式。
+
+**解决方案**：重写 `extract_xml_version()` 函数，先试属性式再试元素式，两种写法均支持。
+
+### 8.14 CPM 包名 `.` 未转义导致正则误匹配
+
+**现象**：从 CPM 查找 `ZL.Watchdog` 的版本时，`grep "Include=\"ZL.Watchdog\""` 中的 `.` 是正则通配符，理论上可能匹配 `ZLXWatchdog`。
+
+**根因**：包名中的 `.` 未转义为 `\.`。
+
+**解决方案**：查找前用 `sed 's/\./\\./g'` 将包名中的 `.` 全部转义。
 
 ---
 
