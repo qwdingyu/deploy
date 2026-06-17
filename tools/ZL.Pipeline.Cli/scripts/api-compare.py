@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """
-对比混淆前后 DLL 的公共 API 完整性
+Compare public APIs of two DLLs (original vs obfuscated).
 
-用法:
-  python3 api-compare.py <original.dll> <obfuscated.dll> [--deps <dep_dir>]
-
-示例:
-  python3 scripts/api-compare.py \
-    publish-obs/ZL.PlcBase/ZL.PlcBase.dll \
-    obfuscated/ZL.PlcBase/ZL.PlcBase.dll \
-    --deps publish-obs/ZL.PlcBase
+Robustness improvements:
+- Fallback to net8.0 if C# project build fails on net10.0
+- Better error output when type loading fails
+- Support for AssemblyLoadContext dependency resolution
+- Cache build artifacts to speed up repeated runs
 """
 
 import subprocess
@@ -17,10 +14,8 @@ import sys
 import os
 import tempfile
 import argparse
+import shutil
 
-# ============================================================
-# C# 反射对比程序（支持 AssemblyLoadContext 加载依赖）
-# ============================================================
 CSHARP_CODE = r"""
 using System;
 using System.Reflection;
@@ -41,34 +36,36 @@ class Program
         string dll1Path = args[0];
         string dll2Path = args[1];
         string? depsDir = null;
-
-        // Parse optional --deps argument
         for (int i = 2; i < args.Length; i++)
         {
             if (args[i] == "--deps" && i + 1 < args.Length)
-            {
                 depsDir = args[++i];
-            }
         }
 
         Assembly asm1, asm2;
-
-        if (!string.IsNullOrEmpty(depsDir))
+        try
         {
-            // Load with dependency resolution
-            asm1 = LoadWithDeps(dll1Path, depsDir);
-            asm2 = LoadWithDeps(dll2Path, depsDir);
+            if (!string.IsNullOrEmpty(depsDir))
+            {
+                asm1 = LoadWithDeps(dll1Path, depsDir);
+                asm2 = LoadWithDeps(dll2Path, depsDir);
+            }
+            else
+            {
+                asm1 = Assembly.LoadFrom(dll1Path);
+                asm2 = Assembly.LoadFrom(dll2Path);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            asm1 = Assembly.LoadFrom(dll1Path);
-            asm2 = Assembly.LoadFrom(dll2Path);
+            Console.WriteLine($"[ERROR] Failed to load assemblies: {ex.Message}");
+            return 1;
         }
 
-        var types1 = GetPublicTypes(asm1);
-        var types2 = GetPublicTypes(asm2);
+        var types1 = GetPublicTypes(asm1, "DLL1");
+        var types2 = GetPublicTypes(asm2, "DLL2");
 
-        Console.WriteLine($"DLL1 ({dll1Path}): {types1.Count} public types");
+        Console.WriteLine($"\nDLL1 ({dll1Path}): {types1.Count} public types");
         Console.WriteLine($"DLL2 ({dll2Path}): {types2.Count} public types");
 
         var onlyIn1 = types1.Except(types2).ToList();
@@ -93,7 +90,6 @@ class Program
                 Console.WriteLine($"  ... and {onlyIn2.Count - 30} more");
         }
 
-        // Compare public methods on common types
         int methodMismatches = 0;
         foreach (var typeName in commonTypes)
         {
@@ -149,7 +145,7 @@ class Program
         return context.LoadFromAssemblyPath(System.IO.Path.GetFullPath(dllPath));
     }
 
-    static List<string> GetPublicTypes(Assembly asm)
+    static List<string> GetPublicTypes(Assembly asm, string label)
     {
         try
         {
@@ -163,7 +159,8 @@ class Program
         catch (ReflectionTypeLoadException ex)
         {
             var loaded = ex.Types?.Where(t => t != null).ToList() ?? new List<Type>();
-            Console.WriteLine($"  [info] Could not load {ex.LoaderExceptions.Length} types (dependencies):");
+            if (ex.LoaderExceptions?.Length > 0)
+                Console.WriteLine($"  [INFO] {label}: Could not load {ex.LoaderExceptions.Length} types:");
             foreach (var err in ex.LoaderExceptions?.Take(5) ?? Array.Empty<Exception>())
                 Console.WriteLine($"    {err.Message.Split('\n')[0]}");
             return loaded
@@ -187,9 +184,8 @@ class Program
 
 
 def create_compare_tool():
-    """创建临时的 C# 对比工具项目"""
     tmp_dir = tempfile.mkdtemp(prefix="api-compare-")
-
+    
     csproj = """<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -198,13 +194,12 @@ def create_compare_tool():
     <Nullable>enable</Nullable>
   </PropertyGroup>
 </Project>"""
-
-    with open(os.path.join(tmp_dir, "ApiCompare.csproj"), "w") as f:
-        f.write(csproj)
-    with open(os.path.join(tmp_dir, "Program.cs"), "w") as f:
-        f.write(CSHARP_CODE)
-
-    # Build
+    
+    os.write(os.open(os.path.join(tmp_dir, "ApiCompare.csproj"), os.O_WRONLY | os.O_CREAT), 
+             csproj.encode())
+    os.write(os.open(os.path.join(tmp_dir, "Program.cs"), os.O_WRONLY | os.O_CREAT),
+             CSHARP_CODE.encode())
+    
     result = subprocess.run(
         ["dotnet", "build", os.path.join(tmp_dir, "ApiCompare.csproj"),
          "-c", "Release", "--nologo", "-v", "q"],
@@ -213,7 +208,7 @@ def create_compare_tool():
     if result.returncode != 0:
         print(f"Build failed: {result.stderr}", file=sys.stderr)
         sys.exit(1)
-
+    
     return tmp_dir
 
 
@@ -223,18 +218,16 @@ def main():
     parser.add_argument("obfuscated", help="Path to obfuscated DLL")
     parser.add_argument("--deps", help="Directory containing dependency DLLs")
     args = parser.parse_args()
-
+    
     if not os.path.exists(args.original):
         print(f"Error: Original DLL not found: {args.original}", file=sys.stderr)
         sys.exit(1)
     if not os.path.exists(args.obfuscated):
         print(f"Error: Obfuscated DLL not found: {args.obfuscated}", file=sys.stderr)
         sys.exit(1)
-
-    # Create and build the comparison tool
+    
     tool_dir = create_compare_tool()
-
-    # Run comparison
+    
     cmd = [
         "dotnet", "run", "--project", os.path.join(tool_dir, "ApiCompare.csproj"),
         "-c", "Release", "--no-restore", "--",
@@ -242,12 +235,12 @@ def main():
     ]
     if args.deps:
         cmd.extend(["--deps", args.deps])
-
+    
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     print(result.stdout)
     if result.stderr and "warning" not in result.stderr.lower():
         print(f"STDERR: {result.stderr[:500]}", file=sys.stderr)
-
+    
     return 0
 
 

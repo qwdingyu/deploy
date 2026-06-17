@@ -1,70 +1,62 @@
 #!/usr/bin/env bash
 # ============================================================================
 # ZL.Pipeline.Cli 安装脚本
-# 将 zl-pipeline 命令安装到系统 PATH 中
+# 使用 pip install -e . 安装到虚拟环境或系统 Python
 #
 # 用法:
-#   bash install.sh                    # 安装到 ~/.local/bin (推荐)
-#   bash install.sh --prefix /usr/local  # 安装到指定目录
-#   bash install.sh --uninstall         # 卸载
+#   bash install.sh                    # 在当前虚拟环境中安装
+#   bash install.sh --system           # 安装到系统 Python（需 --break-system-packages）
+#   bash install.sh --uninstall        # 卸载
 # ============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CLI_SCRIPT="$SCRIPT_DIR/zl-pipeline.py"
+PROJECT_DIR="$SCRIPT_DIR"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
 ok()   { printf "${GREEN}[OK]${NC}     $*\n"; }
-info() { printf "[INFO]    $*\n"; }
+info() { printf "${YELLOW}[INFO]${NC}  $*\n"; }
+err()  { printf "${RED}[ERROR]${NC} $*\n"; }
 
-# 解析参数
-PREFIX="${PREFIX:-$HOME/.local/bin}"
 UNINSTALL=false
+SYSTEM=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --prefix) PREFIX="$2"; shift 2 ;;
+        --system) SYSTEM=true; shift ;;
         --uninstall) UNINSTALL=true; shift ;;
-        *) echo "未知参数: $1"; exit 1 ;;
+        *) err "未知参数: $1"; exit 1 ;;
     esac
 done
 
-mkdir -p "$PREFIX"
-
 if [[ "$UNINSTALL" == "true" ]]; then
     echo "=== 卸载 ZL.Pipeline.Cli ==="
-    rm -f "$PREFIX/zl-pipeline"
-    ok "已移除 $PREFIX/zl-pipeline"
+    pip uninstall -y zl-pipeline 2>/dev/null && ok "已卸载 zl-pipeline" || err "卸载失败"
     echo "完成"
     exit 0
 fi
 
 echo "=== 安装 ZL.Pipeline.Cli ==="
 
-if [[ ! -f "$CLI_SCRIPT" ]]; then
-    echo "${RED}[ERROR]${NC} $CLI_SCRIPT 不存在"
+if [[ ! -f "$PROJECT_DIR/pyproject.toml" ]]; then
+    err "$PROJECT_DIR/pyproject.toml 不存在"
     echo "      请确保在 tools/ZL.Pipeline.Cli/ 目录下运行"
     exit 1
 fi
 
-# 创建包装脚本
-WRAPPER="$PREFIX/zl-pipeline"
-cat > "$WRAPPER" << WRAPPER_EOF
-#!/usr/bin/env bash
-# ZL.Pipeline.Cli 包装脚本 — 自动定位工具目录
-exec python3 "$CLI_SCRIPT" "\$@"
-WRAPPER_EOF
-
-chmod +x "$WRAPPER"
-ok "已安装: $WRAPPER"
-
-if [[ ":$PATH:" != *":$PREFIX:"* ]]; then
-    info "注意: $PREFIX 不在 PATH 中"
-    info "建议添加: export PATH=\"\$PATH:$PREFIX\" 到 ~/.zshrc"
+if [[ "$SYSTEM" == "true" ]]; then
+    info "安装到系统 Python（--break-system-packages）"
+    pip install -e "$PROJECT_DIR" --break-system-packages 2>&1 | tail -3
+else
+    info "安装到当前虚拟环境"
+    pip install -e "$PROJECT_DIR" 2>&1 | tail -3
 fi
+
+ok "zl-pipeline 已安装"
 
 echo ""
 echo "=== 验证安装 ==="
@@ -72,8 +64,8 @@ if command -v zl-pipeline &>/dev/null; then
     ok "zl-pipeline 可用"
     zl-pipeline --help 2>&1 | head -10
 else
-    info "请执行: export PATH=\"\$PATH:$PREFIX\""
-    info "然后: zl-pipeline --help"
+    err "zl-pipeline 命令不可用"
+    info "请检查 Python bin 目录是否在 PATH 中"
 fi
 
 echo ""
@@ -83,4 +75,4 @@ echo "快速开始:"
 echo "  cd <your-project>"
 echo "  zl-pipeline init              # 生成 pipeline.json"
 echo "  zl-pipeline publish 1.0.1     # 发布"
-echo "  zl-pipeline publish --dry-run # 验证"
+echo "  zl-pipeline verify 1.0.1      # 验证"

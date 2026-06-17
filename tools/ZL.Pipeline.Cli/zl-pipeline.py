@@ -2,22 +2,22 @@
 """
 ZL.Pipeline.Cli — 统一发布流水线 CLI 工具
 
-集中管理所有项目的：build → pack → obfuscate → replace-dll → api-compare → verify-nuget → push
+集中管理所有项目的：build → pack → nuspec-fix → [obfuscate → replace-dll → api-compare →] push/local
 
 用法:
-  zl-pipeline publish [--dry-run]       # 完整发布流水线
-  zl-pipeline verify                     # 运行全部验证（不推送）
-  zl-pipeline check <包名> <版本>        # 验证已发布的 NuGet 包
-  zl-pipeline init                       # 在当前项目生成 pipeline.json
-  zl-pipeline list-config                # 列出所有可配置项
-  zl-pipeline --help                     # 显示帮助
+  zl-pipeline publish <version> [-n] [--local]   # 发布流水线（-n 验证，--local 本地 feed）
+  zl-pipeline verify <version>                    # 运行全部验证（不推送）
+  zl-pipeline check <包名> <版本>                 # 验证已发布的 NuGet 包
+  zl-pipeline init                                # 在当前项目生成 pipeline.json
+  zl-pipeline list-config                         # 列出所有可配置项
+  zl-pipeline --help                              # 显示帮助
 
 配置文件:
   1. pipeline.json (项目根目录, 推荐)
   2. --config <path> (指定配置文件)
 
 环境变量:
-  NUGET_API_KEY      NuGet.org API Key
+  NUGET_API_KEY      NuGet.org API Key（远程推送时必需；--local 模式不需要）
   OBFUSCAR_PATH      obfuscar.console 路径 (默认: "obfuscar.console")
 """
 import argparse
@@ -265,6 +265,27 @@ def cmd_publish(args):
     artifacts_dir = Path(proj_dir) / "artifacts"
     obfuscated_dir = Path(proj_dir) / "obfuscated"
 
+    # 同步 nupkg 到 packages/ 目录，供 build 阶段引用
+    pkgs_dir = artifacts_dir / "packages"
+    pkgs_dir.mkdir(parents=True, exist_ok=True)
+    for nupkg in artifacts_dir.glob(f"*.{version}.nupkg"):
+        dest = pkgs_dir / nupkg.name
+        if not dest.exists():
+            import shutil as sh
+            sh.copy2(str(nupkg), str(dest))
+
+    # 如果是 iot-sdk，还需要从 ZL.PlcBase 同步 nupkg（ZL.IotHub、ZL.PFLite、ZL.Tag）
+    plcbase_dir = Path(proj_dir).parent / "ZL.PlcBase"
+    if plcbase_dir.exists():
+        plcbase_pkgs = plcbase_dir / "artifacts"
+        if plcbase_pkgs.exists():
+            for nupkg in plcbase_pkgs.glob(f"*.{version}.nupkg"):
+                dest = pkgs_dir / nupkg.name
+                if not dest.exists():
+                    import shutil as sh
+                    sh.copy2(str(nupkg), str(dest))
+                    log(f"  从 ZL.PlcBase 同步: {nupkg.name}")
+
     # ====================================================================
     # 步骤 1: Clean Build
     # ====================================================================
@@ -302,6 +323,7 @@ def cmd_publish(args):
             ["dotnet", "pack", str(csproj), "-c", "Release", "--nologo",
              "-o", str(artifacts_dir),
              f"-p:PackageVersion={version}",
+             "-p:TreatWarningsAsErrors=false",
              "-v", "q"],
             capture_output=True, text=True, dry_run=dry_run,
             timeout=600, retry=2  # 打包易因 MSBuild 节点问题失败，重试 2 次
@@ -328,7 +350,17 @@ def cmd_publish(args):
     step(3, f"Fix nuspec dependency versions to {version}", cfg)
     import zipfile, shutil, tempfile
     fixed_count = 0
-    external_deps = {"ZL.PFLite", "ZL.PlcBase", "ZL.Tag"}  # 外部包，保持原版本
+    external_deps: set[str] = set()  # external ZL deps from other repos (不在此 pipeline 构建的包)
+    # 从 csproj 解析 ExternalPackageReference 列表
+    for proj in projects:
+        csproj_path = Path(proj_dir) / proj["csproj"]
+        if csproj_path.exists():
+            try:
+                csproj_text = csproj_path.read_text(encoding="utf-8")
+                for m in re.finditer(r"<ExternalPackageReference\s+Include=\"([^\"]+)\"", csproj_text):
+                    external_deps.add(m.group(1))
+            except Exception:
+                pass
     dep_pattern = re.compile(r'<dependency\s+id="(ZL\.[^"]+|ProtocolGateway[^"]*)"\s+version="([^"]+)"')
     for nupkg in sorted(artifacts_dir.glob(f"*.{version}.nupkg")):
         nupkg_name = nupkg.name
@@ -349,7 +381,7 @@ def cmd_publish(args):
                             needs_fix = True
                             nuspec_xml = nuspec_xml.replace(
                                 f'dependency id="{dep_id}" version="{dep_ver}"',
-                                f'<dependency id="{dep_id}" version="{version}"', 1)
+                                f'dependency id="{dep_id}" version="{version}"', 1)
                     if nuspec_xml != original:
                         needs_fix = True
                         new_nuspecs[nf] = nuspec_xml.encode('utf-8')
@@ -380,6 +412,21 @@ def cmd_publish(args):
         ok(f"nuspec 依赖版本已一致 ({version})，无需修复")
 
     # ====================================================================
+    # --local 模式：跳过混淆+远程推送，直接复制到 ~/.nuget/local-feed/
+    # ====================================================================
+    if getattr(args, 'local', False):
+        log("--local 模式，跳过混淆和远程推送")
+        copied = _copy_to_local_feed(artifacts_dir, version)
+        if copied > 0:
+            ok(f"已复制 {copied} 个 nupkg 到 ~/.nuget/local-feed/")
+            for nupkg in sorted(artifacts_dir.glob(f"*.{version}.nupkg")):
+                ok(f"  {nupkg.name}")
+        else:
+            fail("没有 nupkg 可复制")
+        print_report(len(projects), obfuscated=False)
+        return
+
+    # ====================================================================
     # 检查是否需要混淆
     # ====================================================================
     obfuscar_available = check_obfuscar()
@@ -401,9 +448,27 @@ def cmd_publish(args):
             continue
         csproj = Path(proj_dir) / proj["csproj"]
         pub_dir = obfuscated_dir / proj["name"] / "publish"
+        # 多目标框架项目需要指定 TargetFramework
+        with open(csproj) as f:
+            csproj_content = f.read()
+        import re as re2
+        # 优先检测项目自身的 TargetFrameworks（可能覆盖了 Directory.Build.props）
+        tfm_match = re2.search(r'<TargetFrameworks>([^<]+)</TargetFrameworks>', csproj_content)
+        single_tf_match = re2.search(r'<TargetFramework>([^<]+)</TargetFramework>', csproj_content)
+        if tfm_match:
+            # 多目标：检查是否包含 net8.0，否则用第一个 TF
+            frameworks = tfm_match.group(1).split(';')
+            tf = 'net8.0' if 'net8.0' in frameworks else frameworks[0]
+        elif single_tf_match:
+            # 单目标
+            tf = single_tf_match.group(1)
+        else:
+            # 使用 Directory.Build.props 中的 net8.0;net10.0
+            tf = 'net8.0'
+        tfm_flag = ["-p:TargetFramework=" + tf]
         result = run(
             ["dotnet", "publish", str(csproj), "-c", "Release", "--nologo",
-             "-o", str(pub_dir), "-v", "q"],
+             "-o", str(pub_dir), "-v", "q"] + tfm_flag,
             capture_output=True, text=True, dry_run=dry_run,
             timeout=300, retry=1
         )
@@ -491,16 +556,16 @@ def cmd_publish(args):
             fail(f"混淆 DLL 不存在: {obf_dll}")
             continue
 
-        # 自动检测 TFM
+        # 自动检测 TFM — 从 csproj 中读取实际的 TargetFramework
         csproj_path = Path(proj_dir) / proj["csproj"]
         tfm = "net8.0"
         if csproj_path.exists():
             with open(csproj_path) as f:
-                content = f.read()
-            m = re.search(r'<TargetFramework[^>]*>(.*?)</TargetFramework>', content)
+                csproj_text = f.read()
+            # 检测项目自身的 TargetFramework（排除 Directory.Build.props 继承的）
+            m = re.search(r'<TargetFramework([^>]*)>([^<]+)</TargetFramework>', csproj_text)
             if m:
-                tfm = m.group(1).strip()
-
+                tfm = m.group(2).strip()
         result = run(
             [sys.executable, str(replace_script), str(nupkg_path), str(obf_dll), tfm],
             capture_output=True, text=True, dry_run=dry_run,
@@ -596,10 +661,57 @@ def _get_latest_nuget_version(package_id: str, nuget_source: str = None) -> str 
     return None
 
 
+def _get_latest_local_version(package_id: str) -> str | None:
+    """从 ~/.nuget/local-feed/ 查询指定包的最新版本号"""
+    local_feed = Path.home() / ".nuget" / "local-feed"
+    if not local_feed.exists():
+        return None
+    local_pattern = re.compile(
+        rf"^{re.escape(package_id)}\.(\d+\.\d+\.\d+(?:\.\d+)?)(?:-[^\.]+)?\.nupkg$",
+        re.IGNORECASE
+    )
+    versions: list[str] = []
+    for f in local_feed.iterdir():
+        if f.is_file():
+            m = local_pattern.match(f.name)
+            if m:
+                versions.append(m.group(1))
+    if versions:
+        versions.sort(key=lambda v: [int(x) for x in v.split(".") if x.isdigit()])
+        return versions[-1]
+    return None
+
+
+def _copy_to_local_feed(artifacts_dir: Path, version: str) -> int:
+    """将 nupkg 复制到 ~/.nuget/local-feed/"""
+    import shutil
+    local_feed = Path.home() / ".nuget" / "local-feed"
+    local_feed.mkdir(parents=True, exist_ok=True)
+
+    nupkg_files = sorted(artifacts_dir.glob(f"*.{version}.nupkg"))
+    if not nupkg_files:
+        log(f"找不到 *.{version}.nupkg 在 {artifacts_dir}")
+        return 0
+
+    count = 0
+    for nupkg in nupkg_files:
+        dest = local_feed / nupkg.name
+        shutil.copy2(str(nupkg), str(dest))
+        count += 1
+    return count
+
+
 def cmd_align_versions(args):
-    """对齐消费者 CPM 中 ZL 包的版本到各自最新 — 解决独立发版导致的版本碎片化"""
+    """对齐消费者 CPM 中 ZL 包到各自最新版本
+
+    版本来源策略（--source）:
+      auto  → 1) local-feed  2) NuGet.org（默认，兼容双模式）
+      nuget → 仅查询 NuGet.org（独立版本模式）
+      local → 仅查询本地 feed（离线模式）
+    """
     cfg = load_config(args.config)
     dry_run = args.dry_run or cfg.get("dryRun", False)
+    source_mode = getattr(args, 'source', 'auto')
     consumers = cfg.get("consumers", [])
     nuget_source = cfg.get("nugetSource", "https://api.nuget.org/v3/index.json")
 
@@ -609,22 +721,29 @@ def cmd_align_versions(args):
 
     # 获取 pipeline 中定义的所有 ZL 包
     projects = cfg.get("projects", [])
+    proj_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else str(Path.cwd())
     zl_package_ids = set()
     for proj in projects:
-        pkg_id = get_package_id(os.path.dirname(os.path.abspath(args.config)) if args.config else str(Path.cwd()), proj)
+        pkg_id = get_package_id(proj_dir, proj)
         zl_package_ids.add(pkg_id)
 
     # 查询每个包的最新版本
+    source_label = {"auto": "local-feed → NuGet.org", "nuget": "NuGet.org", "local": "local-feed"}
     print(f"\n{'=' * 60}")
-    print(f"  查询 NuGet.org 最新版本")
+    print(f"  查询最新版本 (source={source_label.get(source_mode, source_mode)})")
     print(f"{'=' * 60}")
 
     latest_versions = {}
     for pkg_id in sorted(zl_package_ids):
-        latest = _get_latest_nuget_version(pkg_id, nuget_source)
+        latest = None
+        if source_mode in ("auto", "local"):
+            latest = _get_latest_local_version(pkg_id)
+        if latest is None and source_mode in ("auto", "nuget"):
+            latest = _get_latest_nuget_version(pkg_id, nuget_source)
         if latest:
             latest_versions[pkg_id] = latest
-            print(f"  {pkg_id:35s} => {latest}")
+            src_tag = "local" if source_mode != "nuget" and _get_latest_local_version(pkg_id) == latest else "nuget.org"
+            print(f"  {pkg_id:35s} => {latest}  [{src_tag}]")
         else:
             fail(f"{pkg_id}: 无法查询最新版本")
 
@@ -635,19 +754,28 @@ def cmd_align_versions(args):
     # 更新每个消费者的 CPM
     for consumer in consumers:
         consumer_name = consumer.get("name", "unknown")
-        consumer_paths = _expand_consumer_paths(consumer, os.path.dirname(args.config) if args.config else str(Path.cwd()))
+        consumer_entries = _expand_consumer_paths(consumer, os.path.dirname(args.config) if args.config else str(Path.cwd()))
 
-        for cpm_path in consumer_paths:
-            if not cpm_path.exists():
-                fail(f"消费者 {consumer_name}: CPM 不存在 {cpm_path}")
+        for entry in consumer_entries:
+            cpath = Path(entry["path"])
+            cpm_file = _find_cpm_file(cpath)
+            if cpm_file is None:
+                custom_cpm = entry.get("cpmFile")
+                if custom_cpm:
+                    cpm_file = cpath / custom_cpm
+                else:
+                    fail(f"消费者 {consumer_name}: 未找到 Directory.Packages.props")
+                    continue
+            if not cpm_file.exists():
+                fail(f"消费者 {consumer_name}: CPM 不存在 {cpm_file}")
                 continue
 
             print(f"\n{'=' * 60}")
             print(f"  对齐消费者: {consumer_name}")
-            print(f"  CPM: {cpm_path}")
+            print(f"  CPM: {cpm_file}")
             print(f"{'=' * 60}")
 
-            content = cpm_path.read_text(encoding="utf-8")
+            content = cpm_file.read_text(encoding="utf-8")
             updated_count = 0
             unchanged_count = 0
 
@@ -967,6 +1095,78 @@ def cmd_sync_consumers(args):
     print("=" * 60)
 
 
+def cmd_version_check(args):
+    """版本一致性检查：验证所有消费者 CPM 中的 ZL 包版本与指定版本一致"""
+    cfg = load_config(args.config)
+    version = args.version
+    consumers = cfg.get("consumers", [])
+    proj_dir = os.path.dirname(os.path.abspath(args.config)) if args.config else str(Path.cwd())
+
+    if not consumers:
+        fail("pipeline.json 中未定义 consumers")
+        return
+
+    # 只检查组管道实际构建的包（来自 pipeline.json projects 列表）
+    projects = cfg.get("projects", [])
+    pipeline_packages: set[str] = set()
+    for proj in projects:
+        pkg_id = get_package_id(proj_dir, proj)
+        pipeline_packages.add(pkg_id)
+
+    if not pipeline_packages:
+        fail("pipeline.json 中未定义 projects")
+        return
+
+    print(f"\n{'=' * 60}")
+    print(f"  版本一致性检查 (version={version})")
+    print(f"  检查 {len(pipeline_packages)} 个流水线构建的包")
+    print(f"{'=' * 60}")
+
+    all_ok = True
+    checked_total = 0
+    for consumer in consumers:
+        consumer_name = consumer.get("name", "unknown")
+        consumer_paths = _expand_consumer_paths(consumer, proj_dir)
+
+        for entry in consumer_paths:
+            cpath = Path(entry["path"])
+            if not cpath.exists():
+                all_ok = False
+                continue
+
+            cpm_file = _find_cpm_file(cpath)
+            if cpm_file is None:
+                custom_cpm = entry.get("cpmFile")
+                if custom_cpm:
+                    cpm_file = cpath / custom_cpm
+                else:
+                    all_ok = False
+                    continue
+            if not cpm_file.exists():
+                all_ok = False
+                continue
+
+            content = cpm_file.read_text(encoding="utf-8")
+            for pkg_id in sorted(pipeline_packages):
+                pattern = rf'PackageVersion\s+Include="{re.escape(pkg_id)}"\s+Version="([^"]+)"'
+                m = re.search(pattern, content)
+                if not m:
+                    log(f"{consumer_name}: CPM 中未找到 {pkg_id}，跳过（可能未引用）")
+                    continue
+                pkg_ver = m.group(1)
+                checked_total += 1
+                if pkg_ver != version:
+                    fail(f"{consumer_name}/{cpm_file.name}: {pkg_id} = {pkg_ver} (期望 {version})")
+                    all_ok = False
+
+    print(f"\n  检查了 {checked_total} 个 ZL 包引用")
+    if all_ok:
+        ok(f"所有消费者 CPM 中的 ZL 包版本均为 {version}，完全一致")
+    else:
+        fail(f"存在版本不一致，请运行 'zl-pipeline sync-consumers {version}' 修复")
+        sys.exit(1)
+
+
 # ============================================================================
 # 辅助函数
 # ============================================================================
@@ -1067,6 +1267,12 @@ def do_push(args, cfg, version, proj_dir, artifacts_dir, obfuscate_projs=None):
 
 def print_report(total, obfuscated=False):
     """打印最终报告"""
+    if obfuscated:
+        obf_status = "已启用"
+    elif check_obfuscar():
+        obf_status = "已跳过 (--local 模式)"
+    else:
+        obf_status = "未启用 (obfuscar.console 未安装)"
     print(f"""
 {'=' * 60}
   发布验证报告
@@ -1075,7 +1281,7 @@ def print_report(total, obfuscated=False):
   总测试: {PASS + FAIL}
   通过: {PASS}
   失败: {FAIL}
-  混淆: {'已启用' if obfuscated else '未启用 (obfuscar.console 未安装)'}
+  混淆: {obf_status}
 
   {'✅ 所有验证通过，可以发布' if FAIL == 0 else '❌ 存在失败项，请修复后重试'}
 """)
@@ -1107,9 +1313,12 @@ def main():
   zl-pipeline sync-consumers 1.0.3
   zl-pipeline sync-consumers 1.0.3 --dry-run
 
-  # 对齐下游消费者 CPM 中 ZL 包到各自最新版本（非全量同步）
+  # 对齐下游消费者 CPM 中 ZL 包到各自最新版本
   zl-pipeline align-versions
   zl-pipeline align-versions --dry-run
+
+  # 版本一致性检查（发布前门禁）
+  zl-pipeline version-check 2.2.0
         """
     )
     parser.add_argument("--config", "-c", help="pipeline.json 路径 (默认: 当前目录)")
@@ -1118,8 +1327,9 @@ def main():
     subparsers = parser.add_subparsers(dest="command", help="子命令")
 
     # publish
-    pub_parser = subparsers.add_parser("publish", help="完整发布流水线")
+    pub_parser = subparsers.add_parser("publish", help="发布流水线（默认远程推送，--local 输出到本地 feed）")
     pub_parser.add_argument("version", help="版本号, e.g. 1.0.1")
+    pub_parser.add_argument("--local", "-l", action="store_true", help="本地模式：仅 pack + nuspec 修复，输出到 ~/.nuget/local-feed/，跳过混淆和远程推送")
     pub_parser.add_argument("--dry-run", "-n", action="store_true", help="仅验证不推送")
     pub_parser.add_argument("--stop-on-error", action="store_true", help="遇到错误立即停止")
 
@@ -1146,7 +1356,13 @@ def main():
 
     # align-versions
     align_parser = subparsers.add_parser("align-versions", help="对齐下游消费者 CPM 中 ZL 包到各自最新版本")
+    align_parser.add_argument("--source", choices=["auto", "nuget", "local"], default="auto",
+                              help="版本来源: auto=local 优先→NuGet.org, nuget=仅NuGet.org, local=仅本地feed")
     align_parser.add_argument("--dry-run", "-n", action="store_true", help="仅验证不修改")
+
+    # version-check
+    vc_parser = subparsers.add_parser("version-check", help="版本一致性检查：验证所有消费者 CPM 中的 ZL 包版本一致")
+    vc_parser.add_argument("version", help="期望的版本号, e.g. 2.2.0")
 
     args = parser.parse_args()
 
@@ -1164,6 +1380,8 @@ def main():
         cmd_sync_consumers(args)
     elif args.command == "align-versions":
         cmd_align_versions(args)
+    elif args.command == "version-check":
+        cmd_version_check(args)
     else:
         parser.print_help()
 

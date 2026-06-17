@@ -1,0 +1,2 @@
+[console_scripts]
+zl-pipeline = zl_pipeline.main:main

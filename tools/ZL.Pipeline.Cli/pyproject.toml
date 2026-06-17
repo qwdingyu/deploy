@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zl-pipeline"
+version = "1.0.0"
+description = "ZL.Pipeline.Cli — 统一发布流水线 CLI 工具"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "jsonschema>=4.0",
+]
+
+[project.scripts]
+zl-pipeline = "zl_pipeline.main:main"
+
+[tool.setuptools.packages.find]
+include = ["zl_pipeline*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
