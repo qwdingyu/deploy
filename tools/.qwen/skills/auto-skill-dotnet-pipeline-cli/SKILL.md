@@ -3,7 +3,7 @@ name: dotnet-pipeline-cli
 description: 审查与改进 .NET NuGet 发布流水线 CLI（zl-pipeline），包含模块化架构（Config/Context/Steps/Runner）、多仓库统一版本治理策略、消费者 CPM 同步门禁机制。
 source: auto-skill
 extracted_at: '2026-06-14T03:07:36.011Z'
-updated_at: '2026-06-15T02:00:00.000Z'
+updated_at: '2026-06-26T03:30:00.000Z'
 ---
 
 ## 已落地架构（参考）
@@ -88,6 +88,12 @@ ZL.Pipeline.Cli/
 - 有有效 API key：本地缓存 + 远程推送，远程失败不阻断
 - 有无效 API key：本地缓存成功即返回 `ok=True`，error_detail 包含远程失败信息
 - 本地缓存路径可通过环境变量 `NUGET_LOCAL_FEED` 自定义，默认 `~/.nuget/local-feed`
+
+> ⚠️ **重要警示：远程失败被静默吞掉**
+> 由于 `ok=True  # 本地成功即为通过，远程失败不阻断`，**即使 NUGET_API_KEY 已失效/过期（403），流水线仍然显示成功**。
+> 用户可能长期以为远程推送正常，但实际上并未推送到 nuget.org。
+> 排查方法：观察终端输出或 StateStore 中 push 步骤的 `error_detail`，包含 `"本地: OK | 远程: ..."` 字样。
+> 独立验证脚本：用 `test-nuget-push.sh`（见 tools 目录）针对单个包名做隔离测试，排除流水线逻辑干扰。
 
 **dry-run 兼容性规则（已固化）：**
 每个步骤在检查文件/依赖存在性时，必须检查 `ctx.dry_run`：
@@ -541,3 +547,88 @@ PlcBase pipeline.json 必须配置 consumers（与 iot-sdk 保持一致），否
 | 8 | 版本治理文档（03_版本治理规范） | 确认当前版本号已更新 |
 
 > ⚠️ 常见遗漏：iot-sdk/Directory.Packages.props（生产者自身 CPM）容易漏更新。deploy-fast.sh 和 version-check 只保证消费者 CPM 一致，不保证生产者 CPM 版本。必须手动检查第 2 项。
+
+---
+
+## 未来演进：Trusted Publishing 迁移
+
+### 背景
+
+nuget.org 正在推行 **Trusted Publishing**（基于 GitHub Actions OIDC 的短期令牌机制），替代长期 API Key。详见：[Microsoft Learn - Trusted Publishing](https://learn.microsoft.com/zh-cn/nuget/nuget-org/trusted-publishing)
+
+当前状态（2026-06）：
+- ✅ API Key 仍然可用，**无强制停用时间表**
+- ✅ Trusted Publishing 已上线，当前仅支持 **GitHub Actions**
+- ⚠️ 官方推荐迁移，强调"不再需要管理长期 API 密钥"
+
+### 项目现状
+
+本流水线涉及的 Git 仓库结构（均为本地 git，未上 GitHub）：
+
+| Git 仓库 | 产出 NuGet 包数 | 候选 GitHub 仓库名 |
+|----------|---------------|-------------------|
+| `ZL.PlcBase` | 4 个 | `ZL.PlcBase` |
+| `iot-sdk` | 23 个 | `iot-sdk` |
+| `ZL.PlcSimulator` | 2 个 | `ZL.PlcSimulator` |
+| `tmom` | 若干 | `tmom` |
+
+**关键理解**：Trusted Publishing 策略绑定的是 **GitHub 仓库 + workflow 文件**，不是单个 NuGet 包。一个仓库产出 N 个包，只需 **一条策略** 即可覆盖全部。
+
+### push.py 需要适配的改动
+
+当前代码（基于 API Key）：
+
+```python
+api_key = os.environ.get("NUGET_API_KEY")
+cmd = ["dotnet", "nuget", "push", str(nupkg_path),
+       "-k", api_key, "-s", ctx.config.nuget_source, "--skip-duplicate"]
+```
+
+迁移后（基于 Trusted Publishing）：
+
+```python
+# 方案 A：优先使用 NUGET_TEMP_API_KEY（由 NuGet/login@v1 action 注入）
+# 回退到传统的 NUGET_API_KEY（本地开发/手动测试）
+api_key = os.environ.get("NUGET_TEMP_API_KEY") or os.environ.get("NUGET_API_KEY")
+if not api_key:
+    ...  # 仅本地缓存
+cmd = ["dotnet", "nuget", "push", str(nupkg_path),
+       "-k", api_key, "-s", ctx.config.nuget_source, "--skip-duplicate"]
+```
+
+### 迁移路线图
+
+```
+第 1 步：将 4 个本地 git 仓库推上 GitHub（私有仓库）
+  - 每个仓库建一个私有 GitHub 仓库
+  - 不影响本地开发流程（git remote add origin + git push）
+
+第 2 步：每条 repo 的 pipeline 配置添加 publish.yml 工作流
+  - 使用 NuGet/login@v1 获取临时 API Key
+  - 调用 zl-pipeline publish 时传入 NUGET_TEMP_API_KEY
+
+第 3 步：在 nuget.org 创建 Trusted Publishing 策略
+  - 每个 GitHub 仓库 + workflow 文件配一条策略
+  - 不需要每个包单独配
+
+第 4 步：旧 API Key 保留为本地回退
+  - push.py 修改为"先读 NUGET_TEMP_API_KEY，再回退 NUGET_API_KEY"
+  - 本地手动测试仍可用旧 key
+```
+
+### `test-nuget-push.sh` — 独立验证脚本
+
+当需要**隔离测试**远程推送是否正常（排除流水线逻辑干扰）时，使用 `tools/test-nuget-push.sh`：
+
+```bash
+# 验证 API Key 是否有效
+export NUGET_API_KEY=oy2...
+bash tools/test-nuget-push.sh ZL.PFLite
+# → 403 = key 失效，成功 = key 有效
+
+# 脚本逻辑：
+# 1. mktemp 创建工作目录
+# 2. 创建极简 csproj（netstandard2.0, version 0.0.1-test）
+# 3. dotnet pack → dotnet nuget push --skip-duplicate
+# 4. exit 自动清理临时目录
+```
