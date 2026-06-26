@@ -15,6 +15,15 @@ from zl_pipeline.runner import register_step
 def step_publish_deps(ctx: PipelineContext, project: dict) -> StepResult:
     """dotnet publish -o 准备依赖集（为 Obfuscar 做准备）"""
     project_name = project["name"]
+
+    # --local 模式：跳过 publish_deps（此步骤是为 Obfuscar 混淆准备依赖集，
+    # --local 模式下混淆被跳过，因此无需准备依赖集，直接返回成功。）
+    if ctx.local:
+        return StepResult(
+            step="publish_deps", project=project_name, ok=True, duration=0,
+            command=[], exit_code=0, error_detail="--local 模式，跳过",
+        )
+
     project_dir = ctx.proj_dir / Path(project["csproj"]).parent
     csproj_full = ctx.proj_dir / project["csproj"]
 

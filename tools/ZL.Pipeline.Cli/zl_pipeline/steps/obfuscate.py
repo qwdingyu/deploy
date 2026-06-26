@@ -16,6 +16,15 @@ def step_obfuscate(ctx: PipelineContext, project: dict) -> StepResult:
     """执行 Obfuscar 混淆"""
     project_name = project["name"]
 
+    # --local 模式：跳过混淆
+    # 本地调试场景下，混淆环节（Obfuscar 执行约 30~60 秒 / 项目）耗时且无必要，
+    # 因为本地 feed 仅用于同一台机器上的依赖解析，不会发布到公网。
+    if ctx.local:
+        return StepResult(
+            step="obfuscate", project=project_name, ok=True, duration=0,
+            command=[], exit_code=0, error_detail="--local 模式，跳过混淆",
+        )
+
     # 检查是否启用混淆
     if not project.get("obfuscate", True):
         return StepResult(

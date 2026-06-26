@@ -141,6 +141,7 @@ def _cmd_publish(args: argparse.Namespace, config: PipelineConfig, proj_dir: Pat
         from_step=args.from_step if hasattr(args, "from_step") and args.from_step else None,
         skip_build=args.skip_build,
         resume=args.resume,
+        local=args.local,
         dry_run=False,
         verbose=args.verbose,
     )
@@ -150,6 +151,9 @@ def _cmd_publish(args: argparse.Namespace, config: PipelineConfig, proj_dir: Pat
 
     print(f"\n{'=' * 60}")
     print(f"  发布模式: v{version}")
+    # --local 模式提示：在发布报告前醒目告知用户当前工作在本地模式下
+    if args.local:
+        print(f"  --local 模式：跳过混淆和远程推送")
     print(f"{'=' * 60}\n")
 
     runner = StepRunner(ctx)
@@ -532,6 +536,11 @@ def main() -> None:
     pub_p.add_argument("--from-step", help="从指定步骤开始")
     pub_p.add_argument("--skip-build", action="store_true", help="跳过编译")
     pub_p.add_argument("--resume", action="store_true", help="断点续跑")
+    # --local: 本地发布模式。仅在 develop/fix 分支调试时使用，跳过 obfuscate / replace_nupkg /
+    # api_compare 等混淆相关步骤（这些环节耗时长、且本地调试不关心混淆效果），
+    # push 也只复制到 ~/.nuget/local-feed/，不尝试远程推送。
+    # 工作流：build → pack → fix_nuspec → push(仅本地缓存)。
+    pub_p.add_argument("--local", action="store_true", help="本地模式：仅 pack + nuspec 修复 + 本地缓存，跳过混淆和远程推送")
 
     # ---- check ----
     check_p = subparsers.add_parser("check", help="验证已发布的 NuGet 包")

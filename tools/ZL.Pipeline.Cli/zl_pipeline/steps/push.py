@@ -60,7 +60,10 @@ def step_push(ctx: PipelineContext, project: dict) -> StepResult:
             error_detail=f"nupkg 不存在: {nupkg_path}",
         )
 
-    # === 步骤 1: 本地缓存（始终执行）===
+    # === 步骤 1: 本地缓存（始终执行）=============================================
+    # 无论是否为 --local 模式，nupkg 都会复制一份到 ~/.nuget/local-feed/，
+    # 方便同一台机器上的其他项目（如 iot-sdk / UseThink.Iot）通过本地 NuGet 源直接引用。
+    # 如果已存在同名文件，shutil.copy2 会静默覆盖。
     local_feed = _resolve_local_feed()
     local_feed.mkdir(parents=True, exist_ok=True)
     dest = local_feed / nupkg_path.name
@@ -73,7 +76,24 @@ def step_push(ctx: PipelineContext, project: dict) -> StepResult:
             error_detail=f"本地缓存失败: {e}",
         )
 
-    # === 步骤 2: 远程推送（仅在 NUGET_API_KEY 存在时尝试）===
+    # === 步骤 2: 远程推送（仅在 --local 未设置且 NUGET_API_KEY 存在时尝试）==========
+    #
+    # --local 模式：本地开发 / 快速验证时，不应该污染远程 NuGet 源。
+    # 此时 nupkg 刚刚已经被复制到本地 feed，直接返回成功，不再检查 API_KEY。
+    #
+    # 非 --local 模式：
+    #   - 如果 NUGET_API_KEY 已设置 → 推送到 remote nugetSource（如 NuGet.org / 私有源）
+    #   - 如果未设置 → 仅本地缓存成功即视为 push 通过
+    #
+    # 异常处理：远程超时 / 404 / Forbidden 等异常不会使本地缓存失效，
+    # push 步骤仍返回 ok=True（本地已成功），但 error_detail 会附带远程失败原因。
+    if ctx.local:
+        return StepResult(
+            step="push", project=project_name, ok=True, duration=0,
+            command=["cp", str(nupkg_path), str(dest)], exit_code=0,
+            error_detail=f"--local 模式，已保存到本地: {dest}",
+        )
+
     api_key = os.environ.get("NUGET_API_KEY")
     if not api_key:
         return StepResult(

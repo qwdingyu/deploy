@@ -38,6 +38,10 @@ class PipelineContext:
     from_step: str | None = None
     skip_build: bool = False
     resume: bool = False
+    # --local 模式标志：为 True 时，跳过 obfuscate / replace_nupkg / api_compare
+    # 等混淆相关步骤，push 步骤也仅复制到本地 ~/.nuget/local-feed/ 而不会尝试远程推送。
+    # 适用于本地开发调试、快速验证版本号一致性等场景。
+    local: bool = False
     dry_run: bool = False
     verbose: bool = False
 

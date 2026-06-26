@@ -16,6 +16,16 @@ from zl_pipeline.runner import register_step
 def step_replace_nupkg(ctx: PipelineContext, project: dict) -> StepResult:
     """替换 nupkg 中的 DLL 为混淆后的版本（或不混淆则直接用原始 DLL）"""
     project_name = project["name"]
+
+    # --local 模式：跳过 replace_nupkg
+    # 此步骤用混淆后的 DLL 替换 nupkg 内的原始 DLL，--local 未执行混淆，
+    # nupkg 中已是原始 DLL，无需替换，直接返回成功。
+    if ctx.local:
+        return StepResult(
+            step="replace_nupkg", project=project_name, ok=True, duration=0,
+            command=[], exit_code=0, error_detail="--local 模式，跳过",
+        )
+
     project_dir = ctx.proj_dir / Path(project["csproj"]).parent
 
     # 不混淆的项目：跳过 replace_nupkg（nupkg 中已是原始 DLL，无需替换）

@@ -16,6 +16,16 @@ from zl_pipeline.runner import register_step
 def step_api_compare(ctx: PipelineContext, project: dict) -> StepResult:
     """对比混淆前后的公共 API"""
     project_name = project["name"]
+
+    # --local 模式：跳过 API 对比
+    # 此步骤对比混淆前后的公共 API 是否一致。——local 未执行混淆，
+    # 不存在混淆后 DLL，对比无意义，直接返回成功。
+    if ctx.local:
+        return StepResult(
+            step="api_compare", project=project_name, ok=True, duration=0,
+            command=[], exit_code=0, error_detail="--local 模式，跳过",
+        )
+
     project_dir = ctx.proj_dir / Path(project["csproj"]).parent
 
     pkg_id = get_package_id(project_dir, project["csproj"])
