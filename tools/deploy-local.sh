@@ -76,18 +76,9 @@ if [ -z "$VERSION" ]; then
     # 从全局缓存中获取当前最高版本，自动递增
     version_from_cache() {
         local pkg_name="$1"
-        local lowest="999"
+        # 遍历缓存目录，收集所有版本号后按 semver 排序取最新
         for dir in "$NUGET_CACHE/$pkg_name"/*/; do
-            if [ -d "$dir" ]; then
-                local v=$(basename "$dir")
-                if [ "$v" != "$lowest" ] && [ "$v" \< "$lowest" ] 2>/dev/null || [ "$v" \> "$lowest" ] 2>/dev/null; then
-                    : # skip
-                fi
-                # 比较版本号
-                if command -v sort &>/dev/null; then
-                    echo "$v"
-                fi
-            fi
+            [ -d "$dir" ] && echo "$(basename "$dir")"
         done | sort -V | tail -1
     }
 
@@ -141,8 +132,8 @@ publish_project() {
     # 清理 artifacts
     clean_artifacts "$artifacts_dir"
 
-    # 执行 pipeline publish (不推送到 nuget.org)
-    if python3 "$PIPELINE" publish "$VERSION" --dry-run 2>&1 | tee /dev/stderr; then
+    # 执行 pipeline publish (不推送到 nuget.org，使用 --local 跳过混淆和远程推送)
+    if python3 "$PIPELINE" publish "$VERSION" --local --dry-run 2>&1 | tee /dev/stderr; then
         ok "dry-run 验证通过"
     else
         fail "dry-run 验证失败"
@@ -150,7 +141,7 @@ publish_project() {
     fi
 
     info "开始打包..."
-    if python3 "$PIPELINE" publish "$VERSION" 2>&1 | tee /dev/stderr; then
+    if python3 "$PIPELINE" publish "$VERSION" --local 2>&1 | tee /dev/stderr; then
         ok "$project_name 打包完成"
     else
         fail "$project_name 打包失败"
