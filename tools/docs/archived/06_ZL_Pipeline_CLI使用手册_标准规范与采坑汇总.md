@@ -310,7 +310,7 @@ vim pipeline.json
 zl-pipeline publish 1.0.0 --dry-run
 
 # 5. 正式发布
-export NUGET_API_KEY=oy2i5vtsqu2yzqes4wbq2vgyzeb52jve3onie4ol2os75m
+export NUGET_API_KEY=<REDACTED>
 zl-pipeline publish 1.0.0
 
 # 6. 事后验证

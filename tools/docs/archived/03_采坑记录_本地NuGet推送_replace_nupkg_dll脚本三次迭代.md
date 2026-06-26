@@ -425,7 +425,7 @@ done
 ### 6.3 NuGet 推送验证
 
 ```bash
-export NUGET_API_KEY="oy2i5vtsqu2yzqes4wbq2vgyzeb52jve3onie4ol2os75m"
+export NUGET_API_KEY="<REDACTED>"
 
 dotnet nuget push "artifacts/packages/*.nupkg" \
   -k "$NUGET_API_KEY" \
