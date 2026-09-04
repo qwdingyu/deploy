@@ -194,7 +194,7 @@ def obfuscate(args, pipeline, packed):
         return
 
     # 安装 Obfuscar 工具（全局）
-    tool_check, _ = run("dotnet tool list -g | grep Obfuscar.GlobalTool")
+    _, tool_check = run("dotnet tool list -g | grep Obfuscar.GlobalTool")
     if "Obfuscar.GlobalTool" not in tool_check:
         print("::notice::安装 Obfuscar.GlobalTool 2.2.38...")
         code, _ = run("dotnet tool install --global Obfuscar.GlobalTool --version 2.2.38")
