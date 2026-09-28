@@ -273,9 +273,15 @@ def obfuscate(args, pipeline, packed):
             print(f"  ⚠️ {name}: 混淆后 DLL 未生成 ({obf_dll})")
             continue
 
-        replace_dll_in_nupkg(str(nupkg), str(obf_dll), obf_tfm)
-        print(f"  🔒 {name}.{version}.nupkg ({obf_tfm}, 已混淆)")
+        is_tool = proj.get("type") == "tool"
+        replace_dll_in_nupkg(str(nupkg), str(obf_dll), obf_tfm, is_tool=is_tool)
+        print(f"  🔒 {name}.{version}.nupkg ({obf_tfm}, 已混淆{' [tool]' if is_tool else ''})")
         obfuscated_count += 1
+
+        # tool 包：将 pipeline 中已混淆的依赖项目 DLL 替换进包内（保护工具内嵌的核心代码）
+        dep_names = proj.get("obfuscatedDeps", [])
+        if is_tool and dep_names:
+            replace_tool_dep_dlls(str(nupkg), obf_tfm, dep_names)
 
         # 清理临时 XML
         xml_path.unlink(missing_ok=True)
@@ -283,12 +289,16 @@ def obfuscate(args, pipeline, packed):
     print(f"::notice::混淆完成: {obfuscated_count} 个包")
 
 
-def replace_dll_in_nupkg(nupkg_path, dll_path, tfm):
-    """替换 nupkg 中指定 TFM 的 DLL"""
+def replace_dll_in_nupkg(nupkg_path, dll_path, tfm, is_tool=False):
+    """替换 nupkg 中指定 TFM 的 DLL
+
+    - 库包（默认）: lib/{tfm}/{name}.dll
+    - dotnet tool 包: tools/{tfm}/any/{name}.dll（PackAsTool 布局）
+    """
     dll_name = os.path.basename(dll_path)
     tmp = nupkg_path + ".tmp"
     with zipfile.ZipFile(nupkg_path, "r") as zin:
-        target_entry = f"lib/{tfm}/{dll_name}"
+        target_entry = f"tools/{tfm}/any/{dll_name}" if is_tool else f"lib/{tfm}/{dll_name}"
         found = False
         with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
@@ -300,6 +310,25 @@ def replace_dll_in_nupkg(nupkg_path, dll_path, tfm):
         if not found:
             print(f"  ⚠️ 未在 nupkg 中找到 '{target_entry}'，尝试模糊匹配")
     shutil.move(tmp, nupkg_path)
+
+
+def replace_tool_dep_dlls(nupkg_path, tfm, deps):
+    """将 pipeline 中已混淆的依赖项目 DLL 替换进 tool 包（保护工具内嵌的核心代码）"""
+    if not deps:
+        return
+    with zipfile.ZipFile(nupkg_path, "r") as zin:
+        names = zin.namelist()
+    for dep in deps:
+        entry = f"tools/{tfm}/any/{dep}.dll"
+        src_dll = OBFUSCATED_DIR / dep / f"{dep}.dll"
+        if entry not in names:
+            print(f"  ⚠️ tool 包中无 {entry}，跳过依赖替换")
+            continue
+        if not src_dll.exists():
+            print(f"  ⚠️ 依赖 {dep} 混淆 DLL 缺失（{src_dll}），包内保持未混淆依赖")
+            continue
+        replace_dll_in_nupkg(nupkg_path, str(src_dll), tfm, is_tool=True)
+        print(f"  🔒 工具依赖 {dep}.dll 已替换为混淆版")
 
 
 def write_package_list(packed, version):
