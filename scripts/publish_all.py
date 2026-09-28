@@ -208,9 +208,6 @@ def obfuscate(args, pipeline, packed):
 
     obfuscated_count = 0
     for proj in packed:
-        if not proj.get("obfuscate", False):
-            continue
-
         name = proj["name"]
         csproj = REPO_ROOT / proj["csproj"]
         nupkg = ARTIFACTS_DIR / f"{name}.{version}.nupkg"
@@ -218,7 +215,9 @@ def obfuscate(args, pipeline, packed):
             print(f"  ⚠️ {name} nupkg 不存在，跳过混淆")
             continue
 
-        # 确定用于混淆的 TFM（多 TFM 只混淆 net8.0，跳过 net10.0）
+        is_tool = proj.get("type") == "tool"
+
+        # 确定用于混淆/依赖替换的 TFM（多 TFM 只处理 net8.0，跳过 net10.0）
         tfms = get_target_frameworks(proj["csproj"])
         obf_tfm = "net8.0"
         if obf_tfm not in tfms:
@@ -226,6 +225,18 @@ def obfuscate(args, pipeline, packed):
             stdfm = [t for t in tfms if t.startswith("netstandard")]
             obf_tfm = stdfm[0] if stdfm else tfms[0]
             print(f"  ⚠️ {name}: 使用 {obf_tfm} 替代 net8.0")
+
+        if not proj.get("obfuscate", False):
+            # 不混淆主程序集（如 ASP.NET Core/gRPC 工具壳——Obfuscar 会破坏
+            # WebApplication/gRPC 运行时路径导致 Abort trap，见 PlcSimulator 采坑 #11）。
+            # 但 tool 项目仍须把已混淆的依赖 DLL 替换进包内（核心库保护不变）。
+            dep_names = proj.get("obfuscatedDeps", [])
+            if is_tool and dep_names:
+                replace_tool_dep_dlls(str(nupkg), obf_tfm, dep_names)
+                print(f"  🔒 {name}.{version}.nupkg ({obf_tfm}, 主壳不混淆 [tool]，依赖已替换为混淆版)")
+            else:
+                print(f"  ⏭️ {name}.{version}.nupkg 跳过混淆（obfuscate=false）")
+            continue
 
         # Step 1: dotnet publish（含依赖）
         pod = PUBLISH_OBS_DIR / name
@@ -273,7 +284,6 @@ def obfuscate(args, pipeline, packed):
             print(f"  ⚠️ {name}: 混淆后 DLL 未生成 ({obf_dll})")
             continue
 
-        is_tool = proj.get("type") == "tool"
         replace_dll_in_nupkg(str(nupkg), str(obf_dll), obf_tfm, is_tool=is_tool)
         print(f"  🔒 {name}.{version}.nupkg ({obf_tfm}, 已混淆{' [tool]' if is_tool else ''})")
         obfuscated_count += 1
