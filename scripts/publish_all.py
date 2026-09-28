@@ -142,13 +142,14 @@ def build_and_pack(args, pipeline):
     """构建 + 打包所有项目"""
     version = args.version
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    pack_flags = f'-p:PackageVersion={version} -p:ContinuousIntegrationBuild=true'
+    pack_flags = f'-p:PackageVersion={version} -p:Version={version} -p:ContinuousIntegrationBuild=true'
 
     # 优先用解决方案编译（一次编译所有）
     slns = list(REPO_ROOT.glob("*.sln")) + list(REPO_ROOT.glob("src/*.sln"))
     if slns:
         for sln in slns:
-            code, out = run(f'dotnet build "{sln}" -c Release --no-restore --nologo')
+            # build 也注入 -p:Version：AssemblyVersion 在 build 时生成，pack --no-build 不会重生成
+            code, out = run(f'dotnet build "{sln}" -c Release --no-restore -p:Version={version} --nologo')
             if code == 0:
                 print(f"::notice::解决方案编译成功: {sln.name}")
                 break  # 一个解决方案成功即可
@@ -175,7 +176,7 @@ def build_and_pack(args, pipeline):
             # 可能单个构建失败，尝试单独构建此项目
             print(f"  ⚠️ {proj['name']} pack 失败，尝试单独构建...")
             code, _ = run(
-                f'dotnet build "{csproj}" -c Release --nologo '
+                f'dotnet build "{csproj}" -c Release -p:Version={version} --nologo '
                 f'&& dotnet pack "{csproj}" -c Release --no-build {pack_flags} '
                 f'-o "{ARTIFACTS_DIR}" --nologo'
             )
