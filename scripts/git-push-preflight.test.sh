@@ -20,7 +20,35 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/git-push-preflight.sh"
 PASS=0; FAIL=0
-ACC_A="qwdingyu"; ACC_B="usethinklab"     # 有权 / 无权（依本机实际账号调整）
+
+# ---------------------------------------------------------------------------
+# 账号自动探测——**不硬编码任何真实账号名**。
+# 理由有二，都不是洁癖：
+#   ① 本仓是**公开**的，硬编码账号名等于把"存在第二个账号、且与私有仓
+#      共享访问"这一信息发布出去。没必要。
+#   ② 硬编码让脚本换台机器就跑不了。
+# 探测不到第二个账号时，**如实报告并退出**，绝不伪装成"通过"——
+#   一个在什么都没测的情况下显示全绿的测试，比没有测试更危险。
+# ---------------------------------------------------------------------------
+probe() { # probe <账号> → 该账号对当前仓是否有 push 权限
+  local t; t="$(gh auth token --user "$1" 2>/dev/null)" || return 1
+  [ "$(GH_TOKEN="$t" gh api "repos/$PWD_REPO" --jq '.permissions.push' 2>/dev/null)" = "true" ]
+}
+PWD_REPO="$(git remote get-url origin 2>/dev/null | sed -E 's#.*github.com/##; s#\.git$##')"
+ALL="$(gh auth status 2>/dev/null | sed -nE 's/.*account[[:space:]]+([^[:space:]]+)[[:space:]]+\(keyring\).*/\1/p')"
+ACC_A=""; ACC_B=""
+for a in $ALL; do if probe "$a"; then ACC_A="$a"; break; fi; done
+for a in $ALL; do [ "$a" = "$ACC_A" ] || ACC_B="$a"; done
+
+if [ -z "$ACC_A" ] || [ -z "$ACC_B" ]; then
+  printf '\n\033[33m! 无法完整运行本测试：\033[0m\n'
+  [ -z "$ACC_A" ] && printf '  · 没找到对 %s 有 push 权限的已登录账号\n' "${PWD_REPO:-当前仓}"
+  [ -z "$ACC_B" ] && printf '  · 只登录了一个账号，无法构造「换账号」场景\n'
+  printf '  需要至少两个 gh 账号：其中一个有权，另一个用于验证自动纠正。\n'
+  printf '  这是**环境不具备**，不是测试通过——故此处不计入任何结果。\n\n'
+  exit 2
+fi
+printf '\n（自动探测）有权账号=%s  对照账号=%s\n' "$ACC_A" "$ACC_B"
 
 chk() { # chk <描述> <期望退出码> <实际退出码>
   if [ "$2" = "$3" ]; then printf '  \033[32m✓\033[0m %s\n' "$1"; PASS=$((PASS+1))

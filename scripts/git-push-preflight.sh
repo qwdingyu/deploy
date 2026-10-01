@@ -13,7 +13,7 @@
 #       ① 仓库不存在        ② 仓库存在但当前账号无权限
 #       ③ 活动账号不是 OWNER ④ 网络/DNS 异常
 #   本会话（2026-10-01）就因为没先分清 ①③，误以为是"仓库被删"，
-#   实际只是 gh 活动账号是 usethinklab 而仓库属于 qwdingyu。
+#   实际只是 gh 活动账号是 <另一个账号> 而仓库属于 qwdingyu。
 #
 # 【已验证的机制事实（勿凭直觉推翻，见 docs/241）】
 #   $ printf 'get\nprotocol=https\nhost=github.com\nusername=qwdingyu\n\n' \
@@ -84,7 +84,7 @@ esac
 #
 # 【关于"无权限"与"仓库不存在"能否区分】——**不能**，这是 GitHub 的刻意设计：
 # 对你无权查看的**私有**仓，API 返回 404 而不是 403，以免泄露私有仓是否存在。
-# 本会话实测：usethinklab 查 qwdingyu 私有仓 → 404；
+# 本会话实测：<另一个账号> 查 qwdingyu 私有仓 → 404；
 #             查一个确实不存在的仓 → 也是 404。
 # 因此本脚本**不**谎称能区分二者；它只回答"能不能推"这个真正的问题，
 # 并在失败时把两种可能一并列出，让人去 `gh repo view` 人工确认。
@@ -92,7 +92,7 @@ probe_as() {
   local user="$1" repo="$2" tok pushable
   # 关键：gh api 永远用**活动账号**，所以必须用 GH_TOKEN 显式覆盖。
   # 否则探测别的账号时其实还是活动账号在查（本脚本初版就踩了这个坑：
-  # 传了 usethinklab/qwdingyu 两个参数，结果两次都是活动账号在问）。
+  # 传了 <另一个账号>/qwdingyu 两个参数，结果两次都是活动账号在问）。
   tok="$(gh auth token --user "$user" 2>/dev/null)" || return 1
   [ -n "$tok" ] || return 1
   pushable="$(GH_TOKEN="$tok" gh api "repos/$repo" --jq '.permissions.push' 2>/dev/null)" || return 1
