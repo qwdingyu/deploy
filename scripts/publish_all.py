@@ -43,10 +43,10 @@ def load_pipeline():
         # 尝试父目录（workflows 在 .github 下，CWD 可能是 repo root）
         parent = Path.cwd() / "pipeline.json"
         if parent.exists():
-            return json.loads(parent.read_text())
+            return json.loads(parent.read_text(encoding='utf-8-sig'))
         print(f"::error::pipeline.json 未找到: {PIPELINE_JSON}")
         sys.exit(1)
-    return json.loads(PIPELINE_JSON.read_text())
+    return json.loads(PIPELINE_JSON.read_text(encoding='utf-8-sig'))
 
 
 def ensure_ci_nuget_config():
@@ -62,7 +62,7 @@ def ensure_ci_nuget_config():
   </packageSources>
 </configuration>
 """
-    NUGET_CI_CONFIG.write_text(config)
+    NUGET_CI_CONFIG.write_text(config, encoding='utf-8')
     print(f"::notice::已生成 CI NuGet.Config → {NUGET_CI_CONFIG}")
     return NUGET_CI_CONFIG
 
@@ -85,7 +85,7 @@ def get_target_frameworks(csproj_path):
     if not path.exists():
         print(f"::warning::csproj 不存在: {path}")
         return ["net8.0"]  # 默认假设
-    content = path.read_text()
+    content = path.read_text(encoding='utf-8-sig')
     tfm = ""
     # 优先看 TargetFrameworks（多 TFM），再看 TargetFramework（单 TFM）
     for tag in ["TargetFrameworks", "TargetFramework"]:
@@ -271,7 +271,7 @@ def obfuscate(args, pipeline, packed):
   <Module file="$(InPath)/{name}.dll"/>
 </Obfuscator>"""
         xml_path = REPO_ROOT / f"obfuscar.{name}.xml"
-        xml_path.write_text(obf_xml)
+        xml_path.write_text(obf_xml, encoding='utf-8')
 
         # Step 3: 运行 Obfuscar
         code, out = run(f'obfuscar.console "{xml_path}"')
@@ -350,12 +350,12 @@ def write_package_list(packed, version):
         nupkg = ARTIFACTS_DIR / f"{proj['name']}.{version}.nupkg"
         if nupkg.exists():
             lines.append(str(nupkg))
-    list_file.write_text("\n".join(lines) + "\n")
+    list_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"::notice::包清单已写入 ({len(lines)} 个): {list_file}")
 
     # 输出 GitHub Actions 的 step output
     if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"package-count={len(lines)}\n")
             f.write(f"package-version={version}\n")
 
