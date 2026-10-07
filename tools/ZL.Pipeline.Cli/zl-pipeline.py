@@ -62,7 +62,7 @@ def load_config(config_path: str = None) -> dict:
         print(f"[HINT]  运行 'zl-pipeline init' 生成")
         sys.exit(1)
 
-    with open(path) as f:
+    with open(path, encoding='utf-8-sig') as f:
         cfg = json.load(f)
 
     # 合并默认值
@@ -176,7 +176,7 @@ def get_package_id(proj_dir, proj):
     csproj_path = Path(proj_dir) / proj["csproj"]
     package_id = proj["name"]
     if csproj_path.exists():
-        with open(csproj_path) as f:
+        with open(csproj_path, encoding='utf-8-sig') as f:
             content = f.read()
         m = re.search(r'<PackageId[^>]*>(.*?)</PackageId>', content)
         if m:
@@ -208,7 +208,7 @@ def cmd_init(args):
         if any(x in name.lower() for x in ["test", "perf", "e2e", "bench", "benchmark", "demo", "sample"]):
             continue
         # 排除有特定输出类型的项目（如控制台应用）
-        with open(csproj) as f:
+        with open(csproj, encoding='utf-8-sig') as f:
             csproj_content = f.read()
         if '<OutputType>Exe</OutputType>' in csproj_content or '<OutputType>WinExe</OutputType>' in csproj_content:
             continue
@@ -449,7 +449,7 @@ def cmd_publish(args):
         csproj = Path(proj_dir) / proj["csproj"]
         pub_dir = obfuscated_dir / proj["name"] / "publish"
         # 多目标框架项目需要指定 TargetFramework
-        with open(csproj) as f:
+        with open(csproj, encoding='utf-8-sig') as f:
             csproj_content = f.read()
         import re as re2
         # 优先检测项目自身的 TargetFrameworks（可能覆盖了 Directory.Build.props）
@@ -560,7 +560,7 @@ def cmd_publish(args):
         csproj_path = Path(proj_dir) / proj["csproj"]
         tfm = "net8.0"
         if csproj_path.exists():
-            with open(csproj_path) as f:
+            with open(csproj_path, encoding='utf-8-sig') as f:
                 csproj_text = f.read()
             # 检测项目自身的 TargetFramework（排除 Directory.Build.props 继承的）
             m = re.search(r'<TargetFramework([^>]*)>([^<]+)</TargetFramework>', csproj_text)

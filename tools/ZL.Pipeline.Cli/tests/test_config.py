@@ -98,7 +98,7 @@ class TestLoadConfig:
         p = _write_csproj(tmp_path, "MyLib", '<Project><TargetFramework>net8.0</TargetFramework></Project>')
         result = init_config(tmp_path)
         assert result.exists()
-        data = json.loads(result.read_text())
+        data = json.loads(result.read_text(encoding='utf-8-sig'))
         assert len(data["projects"]) == 1
 
     def test_init_existing_raises(self, tmp_path: Path) -> None:

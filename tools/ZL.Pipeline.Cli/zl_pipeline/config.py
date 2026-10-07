@@ -140,7 +140,7 @@ def load_config(config_path: str | None = None, root: Path | None = None) -> Pip
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}\n运行 'zl-pipeline init' 生成")
 
-    with open(path) as f:
+    with open(path, encoding='utf-8-sig') as f:
         raw = json.load(f)
 
     # 合并默认值
