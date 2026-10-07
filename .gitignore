@@ -1,0 +1,4 @@
+
+# Python 字节码缓存（避免 __pycache__/*.pyc 被误提交）
+__pycache__/
+*.pyc
